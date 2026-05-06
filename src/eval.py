@@ -15,6 +15,7 @@ _DEFAULT_CHI_SQUARE_CURVES_PATH = Path("data") / "chi_square_curves.json"
 _DEFAULT_CRAMERS_V_CURVES_PATH = Path("data") / "cramers_v_curves.json"
 _DEFAULT_SPEARMAN_CURVES_PATH = Path("data") / "spearman_curves.json"
 _DEFAULT_NLI_SPEARMAN_CURVES_PATH = Path("data") / "nli_spearman_curves.json"
+_DEFAULT_SIGNED_CHI_SQUARE_HEATMAP_PATH = Path("data") / "signed_chi_square_heatmap.json"
 
 
 def _label_sort_key(label: Any) -> tuple[int, Any]:
@@ -351,6 +352,62 @@ def _build_spearman_curves_payload(stsb: Mapping[str, Any] | None) -> dict[str, 
     return payload
 
 
+def _build_signed_chi_square_heatmap_payload(
+    chi_square_curves: Mapping[str, Any] | None,
+    selection_rate_curves: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """
+    Derives a signed chi-square heatmap from two already-built curve payloads.
+
+    sign(selection_rate[label][r] - rho[r]) × (-log10(p_value[label][r]))
+
+    Positive = over-selected (blue), negative = under-selected (red), 0 = neutral.
+    """
+    payload: dict[str, Any] = {"rho": [], "curves": {}, "baseline": {"kind": "constant", "label": "neutral", "value": 0.0}}
+
+    if not isinstance(chi_square_curves, Mapping) or not isinstance(selection_rate_curves, Mapping):
+        return payload
+
+    rho = chi_square_curves.get("rho")
+    if not isinstance(rho, list) or not rho:
+        return payload
+
+    chi_curves = chi_square_curves.get("curves", {})
+    sel_curves = selection_rate_curves.get("curves", {})
+
+    if not isinstance(chi_curves, Mapping) or not isinstance(sel_curves, Mapping):
+        return payload
+
+    # Only sign labels that appear in both artifacts
+    common_labels = sorted(
+        set(chi_curves.keys()) & set(sel_curves.keys()),
+        key=_label_sort_key,
+    )
+    if not common_labels:
+        return payload
+
+    signed_curves: dict[str, list[float]] = {}
+    for label in common_labels:
+        chi_vals = chi_curves[label]
+        sel_vals = sel_curves[label]
+        if len(chi_vals) != len(rho) or len(sel_vals) != len(rho):
+            continue
+        signed: list[float] = []
+        for r_idx, r_val in enumerate(rho):
+            magnitude = float(chi_vals[r_idx])
+            sel_rate = float(sel_vals[r_idx])
+            sign = 1.0 if sel_rate >= float(r_val) else -1.0
+            signed.append(sign * magnitude)
+        signed_curves[label] = signed
+
+    if not signed_curves:
+        return payload
+
+    payload["rho"] = [float(r) for r in rho]
+    payload["curves"] = signed_curves
+    return payload
+
+
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -367,6 +424,7 @@ def save_eval_artifacts(
     cramers_v_out_path: str | Path = _DEFAULT_CRAMERS_V_CURVES_PATH,
     spearman_out_path: str | Path = _DEFAULT_SPEARMAN_CURVES_PATH,
     nli_spearman_out_path: str | Path = _DEFAULT_NLI_SPEARMAN_CURVES_PATH,
+    signed_chi_square_heatmap_out_path: str | Path = _DEFAULT_SIGNED_CHI_SQUARE_HEATMAP_PATH,
 ) -> dict[str, Path]:
     selections = _build_selections_payload(counts_pred, counts_gold, rhos)
     chi_square = _build_chi_square_payload(counts_pred, counts_gold, rhos)
@@ -376,18 +434,23 @@ def save_eval_artifacts(
     cramers_v_payload = _build_cramers_v_curves_payload(chi_square)
     spearman_payload = _build_spearman_curves_payload(stsb)
     nli_spearman_payload = _build_spearman_curves_payload(nli)
+    signed_chi_square_payload = _build_signed_chi_square_heatmap_payload(
+        chi_square_payload, selection_rate_payload
+    )
 
     selection_rate_path = Path(selection_rate_out_path)
     chi_square_path = Path(chi_square_out_path)
     cramers_v_path = Path(cramers_v_out_path)
     spearman_path = Path(spearman_out_path)
     nli_spearman_path = Path(nli_spearman_out_path)
+    signed_chi_square_heatmap_path = Path(signed_chi_square_heatmap_out_path)
 
     _write_json(selection_rate_path, selection_rate_payload)
     _write_json(chi_square_path, chi_square_payload)
     _write_json(cramers_v_path, cramers_v_payload)
     _write_json(spearman_path, spearman_payload)
     _write_json(nli_spearman_path, nli_spearman_payload)
+    _write_json(signed_chi_square_heatmap_path, signed_chi_square_payload)
 
     return {
         "selection_rate": selection_rate_path,
@@ -395,4 +458,5 @@ def save_eval_artifacts(
         "cramers_v": cramers_v_path,
         "spearman": spearman_path,
         "nli_spearman": nli_spearman_path,
+        "signed_chi_square": signed_chi_square_heatmap_path,
     }

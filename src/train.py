@@ -385,6 +385,11 @@ class SelectorTrainer:
 
     def train(self) -> None:
         start_epoch = 0
+        
+        if self.cfg.train.untrained:
+            self.logger.info("No train run, only initializated model evaluation")
+            self.final_eval()
+            return
 
         if self.resume_training:
             latest = self.latest_checkpoint()

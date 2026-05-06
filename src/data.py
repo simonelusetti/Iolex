@@ -389,15 +389,18 @@ def initialize_data(
     logger: logging.Logger | None = None,
     device: str = "cpu",
     keep_special: bool = True,
+    encoder: SentenceEncoder | None = None,
+    tokenizer: PreTrainedTokenizerBase | None = None,
 ) -> tuple[DataLoader, DataLoader, SentenceEncoder, PreTrainedTokenizerBase, set[str] | None, DatasetDict]:
     family = ALIAS_TO_CANON[data_cfg.encoder.family.lower()]
     assert keep_special or family != "bge", "keep_special=false is not supported for BGE."
 
-    encoder, tokenizer = build_sentence_encoder(
-        family=data_cfg.encoder.family,
-        encoder_name=data_cfg.encoder.name,
-        device=device,
-    )
+    if encoder is None or tokenizer is None:
+        encoder, tokenizer = build_sentence_encoder(
+            family=data_cfg.encoder.family,
+            encoder_name=data_cfg.encoder.name,
+            device=device,
+        )
 
     ds = get_dataset(data_cfg, runtime_cfg, tokenizer, logger)
     ds = shuffle_and_subset(ds, data_cfg.subset, data_cfg.shuffle)

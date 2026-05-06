@@ -10,10 +10,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.view import (
+    _load_metric_payload_for_run,
+    maybe_extract_metric_payload,
     plot_chi_square_overview,
     plot_loss_overview,
     plot_nli_spearman_overview,
     plot_selection_rates_overview,
+    plot_signed_chi_square_heatmap_overview,
     plot_spearman_overview,
 )
 from utils.dora_utils import (
@@ -22,6 +25,7 @@ from utils.dora_utils import (
     expected_checkpoint,
     filter_sig_dirs_by_group_size,
     load_dora_exclude,
+    load_overrides_for_sig,
     load_run,
     needs_eval,
     rerun_eval,
@@ -29,6 +33,33 @@ from utils.dora_utils import (
 
 
 OUT_ROOT = PROJECT_ROOT / "outputs" / "utils" / "overview"
+
+
+def _filter_groups_for_metric(groups, metric: str) -> list:
+    """Return only groups where at least one run has non-empty curves for this metric."""
+    result = []
+    for group in groups:
+        for run in group.runs:
+            payload = _load_metric_payload_for_run(run.sig_dir, metric=metric)
+            if payload is None:
+                continue
+            parsed = maybe_extract_metric_payload(payload)
+            if parsed is not None:
+                _, curves, _ = parsed
+                if curves:
+                    result.append(group)
+                    break
+    return result
+
+
+def _get_data_subset(overrides: list[str]) -> float:
+    for item in reversed(overrides):
+        if item.startswith("data.subset="):
+            try:
+                return float(item.split("=", 1)[1])
+            except ValueError:
+                pass
+    return 1.0  # not overridden → config default
 
 
 def main() -> None:
@@ -50,6 +81,13 @@ def main() -> None:
         action="store_true",
         help="Convenience flag for --min-runs=2.",
     )
+    parser.add_argument(
+        "--all-subsets",
+        dest="full_dataset_only",
+        action="store_false",
+        help="Include experiments with data.subset != 1.0 (excluded by default).",
+    )
+    parser.set_defaults(full_dataset_only=True)
     args = parser.parse_args()
 
     if args.min_runs < 1:
@@ -65,6 +103,16 @@ def main() -> None:
     for sig_dir in sig_dirs:
         if not sig_dir.exists():
             raise FileNotFoundError(f"Missing signature directory: {sig_dir}")
+
+    if args.full_dataset_only:
+        before = len(sig_dirs)
+        sig_dirs = [
+            d for d in sig_dirs
+            if _get_data_subset(load_overrides_for_sig(d) or []) == 1.0
+        ]
+        excluded = before - len(sig_dirs)
+        if excluded:
+            print(f"Excluded {excluded} signature(s) with data.subset != 1.0 (pass --all-subsets to include).")
 
     exclude_patterns = load_dora_exclude()
     sig_dirs = filter_sig_dirs_by_group_size(sig_dirs, exclude_patterns, min_group_runs)
@@ -114,11 +162,22 @@ def main() -> None:
             shutil.rmtree(child)
 
     plot_loss_overview(groups, out_root / "loss_overview.png", ncols=args.ncols)
-    plot_selection_rates_overview(groups, out_root / "selection_rates_overview.png", ncols=args.ncols)
-    plot_chi_square_overview(groups, out_root / "chi_square_overview.png", ncols=args.ncols, metric="chi_square")
-    plot_chi_square_overview(groups, out_root / "cramers_v_overview.png", ncols=args.ncols, metric="cramers_v")
     plot_spearman_overview(groups, out_root / "spearman_overview.png", ncols=args.ncols)
     plot_nli_spearman_overview(groups, out_root / "nli_spearman_overview.png", ncols=args.ncols)
+
+    sel_groups = _filter_groups_for_metric(groups, "selection_rate")
+    if sel_groups:
+        plot_selection_rates_overview(sel_groups, out_root / "selection_rates_overview.png", ncols=args.ncols)
+    else:
+        print("Skipping selection_rate overview (no labeled datasets).")
+
+    chi_groups = _filter_groups_for_metric(groups, "chi_square")
+    if chi_groups:
+        plot_chi_square_overview(chi_groups, out_root / "chi_square_overview.png", ncols=args.ncols, metric="chi_square")
+        plot_chi_square_overview(chi_groups, out_root / "cramers_v_overview.png", ncols=args.ncols, metric="cramers_v")
+        plot_signed_chi_square_heatmap_overview(chi_groups, out_root / "signed_chi_square_heatmap_overview.png", ncols=args.ncols)
+    else:
+        print("Skipping chi_square / cramers_v / signed_chi_square overviews (no labeled datasets).")
 
     print(f"Saved overview figures to {out_root}")
 

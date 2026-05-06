@@ -32,6 +32,7 @@ train:
   no_train: false
   continue: false
   checkpoint_path: model_10.pth
+  untrained: false
 
 runtime:
   grid: false

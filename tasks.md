@@ -15,3 +15,9 @@
 - 2/3 sentence e token encoder
 
 - vedere se il nostro modello produce ranking che sono sottoinsieme li uni degli altri (con condizionamento su rho o no)
+
+- controllare il modello non allenato
+- matrice di profilo di selezioni (ictus plot)
+    - heatmap e rank medio (std del rank del cls)
+
+- nuovi plot: heatmap con colore inutile, colore preso sempre, colore non preso mai
