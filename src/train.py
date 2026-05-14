@@ -379,7 +379,7 @@ class SelectorTrainer:
         for metric_name, artifact_path in artifact_paths.items():
             self.logger.info("Saved %s artifact to: %s", metric_name, artifact_path)
 
-        plot_paths = save_eval_plots(artifact_paths.keys())
+        plot_paths = save_eval_plots(artifact_paths.keys(), dataset_name=self.cfg.data.dataset)
         for metric_name, plot_path in plot_paths.items():
             self.logger.info("Saved %s plot to: %s", metric_name, plot_path)
 

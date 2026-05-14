@@ -17,6 +17,7 @@ from src.view import (
     plot_nli_spearman_overview,
     plot_selection_rates_overview,
     plot_signed_chi_square_heatmap_overview,
+    plot_spearman_combined,
     plot_spearman_overview,
 )
 from utils.dora_utils import (
@@ -86,6 +87,30 @@ def main() -> None:
         dest="full_dataset_only",
         action="store_false",
         help="Include experiments with data.subset != 1.0 (excluded by default).",
+    )
+    parser.add_argument(
+        "--titles",
+        nargs="+",
+        default=None,
+        metavar="TITLE",
+        help="Custom titles for each panel, in group order. Panels without a matching title keep the auto-generated label.",
+    )
+    parser.add_argument(
+        "--combined-spearman",
+        action="store_true",
+        help="Produce a single combined Spearman plot with one curve per group instead of the regular overview figures.",
+    )
+    parser.add_argument(
+        "--group-labels",
+        nargs="+",
+        default=None,
+        metavar="LABEL",
+        help="Labels for each group curve in the combined Spearman plot, in group order.",
+    )
+    parser.add_argument(
+        "--single-random",
+        action="store_true",
+        help="In --combined-spearman mode, pool all groups' random curves into one averaged grey curve.",
     )
     parser.set_defaults(full_dataset_only=True)
     args = parser.parse_args()
@@ -161,21 +186,33 @@ def main() -> None:
         if child.is_dir():
             shutil.rmtree(child)
 
-    plot_loss_overview(groups, out_root / "loss_overview.png", ncols=args.ncols)
-    plot_spearman_overview(groups, out_root / "spearman_overview.png", ncols=args.ncols)
-    plot_nli_spearman_overview(groups, out_root / "nli_spearman_overview.png", ncols=args.ncols)
+    if args.combined_spearman:
+        plot_spearman_combined(
+            groups,
+            out_root / "spearman_combined.png",
+            group_labels=args.group_labels,
+            single_random=args.single_random,
+        )
+        print(f"Saved combined Spearman plot to {out_root / 'spearman_combined.png'}")
+        return
+
+    titles = args.titles
+
+    plot_loss_overview(groups, out_root / "loss_overview.png", ncols=args.ncols, titles=titles)
+    plot_spearman_overview(groups, out_root / "spearman_overview.png", ncols=args.ncols, titles=titles)
+    plot_nli_spearman_overview(groups, out_root / "nli_spearman_overview.png", ncols=args.ncols, titles=titles)
 
     sel_groups = _filter_groups_for_metric(groups, "selection_rate")
     if sel_groups:
-        plot_selection_rates_overview(sel_groups, out_root / "selection_rates_overview.png", ncols=args.ncols)
+        plot_selection_rates_overview(sel_groups, out_root / "selection_rates_overview.png", ncols=args.ncols, titles=titles)
     else:
         print("Skipping selection_rate overview (no labeled datasets).")
 
     chi_groups = _filter_groups_for_metric(groups, "chi_square")
     if chi_groups:
-        plot_chi_square_overview(chi_groups, out_root / "chi_square_overview.png", ncols=args.ncols, metric="chi_square")
-        plot_chi_square_overview(chi_groups, out_root / "cramers_v_overview.png", ncols=args.ncols, metric="cramers_v")
-        plot_signed_chi_square_heatmap_overview(chi_groups, out_root / "signed_chi_square_heatmap_overview.png", ncols=args.ncols)
+        plot_chi_square_overview(chi_groups, out_root / "chi_square_overview.png", ncols=args.ncols, metric="chi_square", titles=titles)
+        plot_chi_square_overview(chi_groups, out_root / "cramers_v_overview.png", ncols=args.ncols, metric="cramers_v", titles=titles)
+        plot_signed_chi_square_heatmap_overview(chi_groups, out_root / "signed_chi_square_heatmap_overview.png", ncols=args.ncols, titles=titles)
     else:
         print("Skipping chi_square / cramers_v / signed_chi_square overviews (no labeled datasets).")
 

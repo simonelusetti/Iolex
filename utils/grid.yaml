@@ -1,9 +1,9 @@
 baseline:
   - "runtime.grid=true"
   - "data.dataset=stsb"
-  - "train.continue=true"
+  - "runtime.data.batch_size=16"
 sweep:
-  - ["data.encoder.family=llm"]
-  - ["data.encoder.family=bge"]
-  - ["data.encoder.family=e5"]
-  - []
+  - [data.encoder.family=e5, "run=1"]
+  - [data.encoder.family=e5, "run=2"]
+  - [data.encoder.family=llm, "run=1"]
+  - [data.encoder.family=llm, "run=2"]

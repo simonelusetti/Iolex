@@ -54,7 +54,6 @@ DEFAULT_CFG = {
         "exclude_special": True,
         "max_masks_per_sentence": 64,
         "seed": 1234,
-        "jacobian_vectorize": False,
         "plots_dir": "outputs/linearize",
         "eval_chunk": 256,
     },
@@ -143,28 +142,95 @@ def build_random_candidate_masks_per_rho(
     return masks
 
 
-def compute_sentence_linearization_basis(
+# ---------------------------------------------------------------------------
+# Fix 1: special-token-free baseline
+# ---------------------------------------------------------------------------
+
+def compute_nospecial_reference(
     ids_i: torch.Tensor,
     attn_i: torch.Tensor,
     encoder,
-    vectorize_jacobian: bool = False,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    mask0 = attn_i.float().detach().clone().requires_grad_(True)
+    valid_start: int,
+    valid_end: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Baseline quantities with CLS/SEP excluded from both attention and pooling.
 
-    def encode(mask_1d: torch.Tensor) -> torch.Tensor:
-        mask_b = mask_1d.unsqueeze(0)
-        token_emb = encoder.token_embeddings(ids_i, mask_b)
-        sent = encoder.pool(token_emb, mask_b)
-        return F.normalize(sent.squeeze(0), dim=-1)
+    Builds a mask that is 1 at content positions [valid_start, valid_end) and 0
+    elsewhere, then runs a single forward pass to obtain the hidden states and
+    pooled embedding under that mask.  This ensures the reference embedding uses
+    the same token set as every candidate mask, so at rho=1.0 the candidate
+    embedding equals the reference and the reconstruction loss is exactly 0.
 
-    try:
-        jac = torch.autograd.functional.jacobian(encode, mask0, vectorize=vectorize_jacobian)
-    except TypeError:
-        jac = torch.autograd.functional.jacobian(encode, mask0)
+    Returns
+    -------
+    nospecial_mask_b : [1, L] float – 1 at content positions, 0 elsewhere
+    H_L              : [L, d] – final hidden states under the no-special mask
+    e                : [d]    – encoder.pool output (reference for actual losses;
+                                also used in the removal formula as the mean)
+    e_hat            : [d]    – L2-normalised direction (defines P_perp)
+    """
+    seq_len = int(attn_i.numel())
+    device  = attn_i.device
+    nospecial_mask = torch.zeros(seq_len, device=device, dtype=torch.float32)
+    nospecial_mask[valid_start:valid_end] = 1.0
+    nospecial_mask_b = nospecial_mask.unsqueeze(0)          # [1, L]
 
-    baseline_hat = encode(mask0).detach()
-    orth_component = jac - baseline_hat[:, None] * torch.matmul(baseline_hat, jac).unsqueeze(0)
-    return baseline_hat, orth_component
+    with torch.inference_mode():
+        H_L_b = encoder.token_embeddings(ids_i, nospecial_mask_b)  # [1, L, d]
+        H_L   = H_L_b.squeeze(0)                                    # [L, d]
+        e     = encoder.pool(H_L_b, nospecial_mask_b).squeeze(0)    # [d]
+        e_hat = F.normalize(e, dim=-1)                              # [d]
+
+    return nospecial_mask_b, H_L, e, e_hat
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: analytical ranking formula (removal term)
+# ---------------------------------------------------------------------------
+
+def compute_analytical_scores(
+    H_L:             torch.Tensor,
+    e:               torch.Tensor,
+    e_hat:           torch.Tensor,
+    candidate_masks: torch.Tensor,
+) -> torch.Tensor:
+    r"""Rank candidate keep-masks using the linearised removal formula.
+
+    For a keep-mask m (1=keep, 0=masked), the masked token set is
+    M = {t : m[t]=0}.  The first-order change in the normalised embedding is
+    approximated by the *removal term* of the derivation (rank_linearized.md,
+    Step 2, dominance regime):
+
+        delta(M) = sum_{t in M}  (e - H_L[t, :])
+        r(M)     = || P_perp  delta(M) ||
+                 = || (I - e_hat e_hat^T) delta(M) ||
+
+    This is computable from a single inference pass (no autograd required).
+    The multi-layer attention-propagation correction (Section II of
+    rank_linearized.md) requires per-layer hooks and is not included here.
+
+    Parameters
+    ----------
+    H_L             : [N, d]
+    e               : [d]       mean embedding (possibly un-normalised)
+    e_hat           : [d]       normalised embedding  (defines P_perp)
+    candidate_masks : [R, Mc, N]  binary keep-masks (1=keep, 0=masked)
+
+    Returns
+    -------
+    scores : [R, Mc]  float32  (smaller score → mask changes e_hat less)
+    """
+    diff   = e.unsqueeze(0) - H_L                         # [N, d]
+    masked = 1.0 - candidate_masks.to(dtype=e.dtype)      # [R, Mc, N]
+
+    # sum_{t in M} (e - H_L[t,:])  →  [R, Mc, d]
+    removal = torch.einsum("rmn,nd->rmd", masked, diff)
+
+    # P_perp: remove the component along e_hat
+    proj   = torch.einsum("rmd,d->rm", removal, e_hat)             # [R, Mc]
+    r_perp = removal - proj.unsqueeze(-1) * e_hat[None, None, :]   # [R, Mc, d]
+
+    return torch.linalg.vector_norm(r_perp, dim=2)   # [R, Mc]
 
 
 def compute_all_candidate_losses(
@@ -178,7 +244,7 @@ def compute_all_candidate_losses(
 
     Args:
         ids_i:           [1, L] token ids for one sentence
-        full_rep_i:      [d] full sentence pooled representation
+        full_rep_i:      [d] reference pooled representation (no-special baseline)
         encoder:         SentenceEncoder
         candidate_masks: [n_rhos, max_masks, L]
         chunk:           max encoder batch size to avoid OOM
@@ -330,8 +396,6 @@ def main() -> None:
     parser.add_argument("--max-masks-per-sentence", type=int, default=None,
                         help="Candidate masks per sentence/rho (default 64; more = better Spearman but slower).")
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--jacobian-vectorize", action="store_true",
-                        help="Use vectorized Jacobian (faster but less interrupt-friendly).")
     parser.add_argument(
         "overrides",
         nargs="*",
@@ -356,8 +420,6 @@ def main() -> None:
         override_list.append(f"linearize.max_masks_per_sentence={args.max_masks_per_sentence}")
     if args.seed is not None:
         override_list.append(f"linearize.seed={args.seed}")
-    if args.jacobian_vectorize:
-        override_list.append("linearize.jacobian_vectorize=true")
     if args.keep_special and args.drop_special:
         raise ValueError("Use only one of --keep-special or --drop-special.")
     if args.keep_special:
@@ -397,7 +459,6 @@ def main() -> None:
     exclude_special = bool(cfg.linearize.get("exclude_special", True))
     max_masks_per_sentence = max(1, int(cfg.linearize.get("max_masks_per_sentence", 64)))
     seed = int(cfg.linearize.get("seed", 1234))
-    jacobian_vectorize = bool(cfg.linearize.get("jacobian_vectorize", False))
     eval_chunk = int(cfg.linearize.get("eval_chunk", 256))
 
     # Per-rho accumulators ------------------------------------------------
@@ -429,11 +490,6 @@ def main() -> None:
         ids_b  = batch["ids"].to(device)
         attn_b = batch["attn_mask"].to(device)
 
-        attn_f_b = attn_b.float()
-        with torch.inference_mode():
-            full_token_emb_b = encoder.token_embeddings(ids_b, attn_b)
-            full_rep_b       = encoder.pool(full_token_emb_b, attn_f_b)
-
         valid_start, valid_end_b, n_valid_b = compute_valid_span(attn_b, exclude_special)
         valid_sentence_mask = n_valid_b > 0
         if not bool(valid_sentence_mask.any().item()):
@@ -446,33 +502,38 @@ def main() -> None:
         valid_idx = torch.nonzero(valid_sentence_mask, as_tuple=False).squeeze(1)
 
         for bi in valid_idx.tolist():
-            ids_i      = ids_b[bi: bi + 1]
-            attn_i     = attn_b[bi]
-            full_rep_i = full_rep_b[bi]
+            ids_i  = ids_b[bi: bi + 1]
+            attn_i = attn_b[bi]
 
-            _, orth_component = compute_sentence_linearization_basis(
-                ids_i, attn_i, encoder, vectorize_jacobian=jacobian_vectorize,
+            valid_end_i = int(valid_end_b[bi].item())
+            k_r         = k_br[bi]
+
+            # ── Fix 1: special-token-free baseline ──────────────────────────
+            # CLS/SEP are excluded from both attention keys and mean-pooling,
+            # matching the convention used in every candidate mask.
+            # At rho=1.0 the candidate mask equals nospecial_mask → loss = 0.
+            nospecial_mask_b, H_L_i, e_i, e_hat_i = compute_nospecial_reference(
+                ids_i, attn_i, encoder, valid_start, valid_end_i,
             )
 
-            attn_i_float = attn_i.float()
-            valid_end_i  = int(valid_end_b[bi].item())
-            k_r          = k_br[bi]
-
             candidate_masks_rm = build_random_candidate_masks_per_rho(
-                attn_i_float, valid_start, valid_end_i, k_r,
+                nospecial_mask_b.squeeze(0), valid_start, valid_end_i, k_r,
                 max_masks_per_sentence, seed + evaluated * 1000 + bi,
             )
             if candidate_masks_rm.numel() == 0:
                 continue
 
-            # Linearized (approx) scores [n_rhos, max_masks]
-            delta         = candidate_masks_rm.float() - attn_i_float.view(1, 1, -1)
-            approx_delta  = delta @ orth_component.T
-            approx_scores = torch.linalg.vector_norm(approx_delta, dim=2)
+            # ── Fix 2: analytical ranking scores [n_rhos, max_masks] ────────
+            # r(M) = || P_perp  sum_{t in M} (e - H_L[t,:]) ||
+            # No autograd — one inference pass is enough.
+            approx_scores = compute_analytical_scores(
+                H_L_i, e_i, e_hat_i, candidate_masks_rm,
+            )
 
             # Actual reconstruction losses for ALL candidates [n_rhos, max_masks]
+            # Reference is the no-special embedding (consistent with candidates).
             actual_losses = compute_all_candidate_losses(
-                ids_i, full_rep_i, encoder, candidate_masks_rm, chunk=eval_chunk,
+                ids_i, e_i, encoder, candidate_masks_rm, chunk=eval_chunk,
             )  # float64, on device
 
             # Task 2: per-strategy losses

@@ -111,8 +111,15 @@ def gpt_token_embeddings(
     """
     Returns last hidden states [B, T, D] for GPT-style encoders.
     Uses attention_mask only as a standard padding mask (0/1).
+
+    HuggingFace causal models compute the additive bias as (1 - mask) * -inf,
+    so values outside [0, 1] produce incorrect biases (+inf for mask > 1).
+    Clamping guards against soft z values that can exceed 1.
     """
-    return model(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+    return model(
+        input_ids=input_ids,
+        attention_mask=attention_mask.clamp(0.0, 1.0),
+    ).last_hidden_state
 
 
 # -----------------------------------------------------------------------------

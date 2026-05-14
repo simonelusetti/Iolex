@@ -327,7 +327,7 @@ def run_stsb_sweep(cfg, device, encoder, tokenizer, selector):
         encoder,
         tokenizer,
         device,
-        hard=bool(cfg.runtime.eval.get("hard", False)),
+        hard=bool(cfg.runtime.eval.get("hard", True)),
         keep_special=keep_special,
     )
     

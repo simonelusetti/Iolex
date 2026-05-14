@@ -245,5 +245,4 @@ def build_groups(runs: list[RunData], exclude_patterns: list[str]) -> list[Group
         )
         for key, group_runs in grouped.items()
     ]
-    out.sort(key=lambda g: (g.label, len(g.runs)))
     return out
