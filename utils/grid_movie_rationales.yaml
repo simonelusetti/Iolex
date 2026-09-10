@@ -10,7 +10,6 @@ globals:
   # saturating ~23/32 cores and starving the tagger runs to a crawl.
   - "runtime.threads=16"
   # Numerically equivalent (operator fusion, not an approximation).
-  - "runtime.compile=true"
   # Lets re-running this grid resume gracefully: SelectorTrainer.train()
   # resumes from the latest checkpoint across the experiment's runs when
   # continue=true (or just re-runs final_eval if a run already finished all

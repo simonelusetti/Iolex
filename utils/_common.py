@@ -27,6 +27,7 @@ core-pipeline norm/colormap.
 """
 import json
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -124,9 +125,18 @@ TOKEN_ENCODERS = {"bert", "electra", "roberta"}
 EXCLUDE_LABELS = {"O", "special"}
 
 
-def entity_tags(dataset: str) -> list[str]:
+def entity_tags(dataset: str, exclude: Iterable[str] | None = None) -> list[str]:
+    """The dataset's tags, minus a configurable exclusion set.
+
+    Defaults to EXCLUDE_LABELS, which drops the background class. That is a
+    real analytical choice, not housekeeping: on wikiann "O" is ~50% of tokens
+    and dropping it takes the correlation from 7 points to 6. Pass exclude=[]
+    to keep everything -- which is what the UD corpora need, since every token
+    there carries a real linguistic label and there is no background class.
+    """
+    drop = set(EXCLUDE_LABELS if exclude is None else exclude)
     label_map = LABEL_DISPLAY_NAMES.get(dataset, {})
-    return [name for name in label_map.values() if name not in EXCLUDE_LABELS]
+    return [name for name in label_map.values() if name not in drop]
 
 
 # ---------------------------------------------------------------------------

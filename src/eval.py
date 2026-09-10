@@ -17,6 +17,7 @@ _DEFAULT_EFFECT_SIZE_CURVES_PATH = Path("data") / "effect_size_curves.json"
 _DEFAULT_EXACT_TEST_SUMMARY_PATH = Path("data") / "exact_test_summary.json"
 _DEFAULT_FREQ_BINNED_EFFECTS_PATH = Path("data") / "freq_binned_effects.json"
 _DEFAULT_SELECTION_LOGREG_PATH = Path("data") / "selection_logreg.json"
+_DEFAULT_SELECTION_LOG_PATH = Path("data") / "selection_log.npz"
 _DEFAULT_SPEARMAN_CURVES_PATH = Path("data") / "spearman_curves.json"
 _FREQ_BINS = 5
 
@@ -415,6 +416,7 @@ def save_eval_artifacts(
     exact_test_summary_out_path: str | Path = _DEFAULT_EXACT_TEST_SUMMARY_PATH,
     freq_binned_out_path: str | Path = _DEFAULT_FREQ_BINNED_EFFECTS_PATH,
     selection_logreg_out_path: str | Path = _DEFAULT_SELECTION_LOGREG_PATH,
+    selection_log_out_path: str | Path = _DEFAULT_SELECTION_LOG_PATH,
     stsb: Mapping[str, Any] | None = None,
     spearman_out_path: str | Path = _DEFAULT_SPEARMAN_CURVES_PATH,
 ) -> dict[str, Path]:
@@ -455,6 +457,15 @@ def save_eval_artifacts(
         _write_json(selection_logreg_path, build_selection_logreg_payload(selection_log))
         paths["freq_binned_effects"] = freq_binned_path
         paths["selection_logreg"] = selection_logreg_path
+
+        # The raw per-word record the two payloads above are computed from.
+        # Everything else this eval writes is aggregated over the corpus and
+        # cannot be disaggregated afterwards, so without this the per-word and
+        # per-word-type analyses are simply not derivable from a finished run.
+        selection_log_path = Path(selection_log_out_path)
+        selection_log_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(selection_log_path, **selection_log.payload())
+        paths["selection_log"] = selection_log_path
 
     if stsb is not None:
         spearman_payload = _build_spearman_curves_payload(stsb)

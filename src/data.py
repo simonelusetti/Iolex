@@ -11,6 +11,8 @@ from .sentence import ALIAS_TO_CANON, build_sentence_encoder, SentenceEncoder
 from .utils import to_absolute_path
 
 from .datasets_builders import (
+    build_fewnerd,
+    build_fewnerd_fine,
     build_conll2000,
     build_ud_deprel,
     build_ud_discourse,
@@ -30,6 +32,8 @@ ALIASES = {
     "ud_upos": {"ud_upos", "upos", "ud-upos"},
     "ud_deprel": {"ud_deprel", "deprel", "ud-deprel"},
     "ud_discourse": {"ud_discourse", "discourse", "rst", "gum"},
+    "fewnerd": {"fewnerd", "few_nerd", "few-nerd"},
+    "fewnerd_fine": {"fewnerd_fine", "few_nerd_fine", "fewnerd-fine"},
 }
 
 BUILDERS = {
@@ -41,6 +45,8 @@ BUILDERS = {
     "ud_upos": build_ud_upos,
     "ud_deprel": build_ud_deprel,
     "ud_discourse": build_ud_discourse,
+    "fewnerd": build_fewnerd,
+    "fewnerd_fine": build_fewnerd_fine,
 }
 
 PAD_TAG = "-100"
@@ -118,6 +124,12 @@ LABEL_DISPLAY_NAMES["movie_rationales"] = LABEL_DISPLAY_NAMES["mr"]
 LABEL_DISPLAY_NAMES["ud_upos"] = {str(i): t for i, t in enumerate(['ADJ', 'ADP', 'ADV', 'AUX', 'CCONJ', 'DET', 'INTJ', 'NOUN', 'NUM', 'PART', 'PRON', 'PROPN', 'PUNCT', 'SCONJ', 'SYM', 'VERB', 'X'])}
 LABEL_DISPLAY_NAMES["ud_discourse"] = {str(i): t for i, t in enumerate(['ROOT', 'adversative-antithesis', 'adversative-concession', 'adversative-contrast_m', 'attribution-negative', 'attribution-positive', 'causal-cause', 'causal-result', 'context-background', 'context-circumstance', 'contingency-condition', 'elaboration-additional', 'elaboration-attribute', 'evaluation-comment', 'explanation-evidence', 'explanation-justify', 'explanation-motivation', 'joint-disjunction_m', 'joint-list_m', 'joint-other_m', 'joint-sequence_m', 'mode-manner', 'mode-means', 'organization-heading', 'organization-phatic', 'organization-preparation', 'purpose-attribute', 'purpose-goal', 'restatement-partial', 'restatement-repetition_m', 'same-unit_m', 'topic-question', 'topic-solutionhood'])}
 LABEL_DISPLAY_NAMES["ud_deprel"] = {str(i): t for i, t in enumerate(['acl', 'acl:relcl', 'advcl', 'advcl:relcl', 'advmod', 'amod', 'appos', 'aux', 'aux:pass', 'case', 'cc', 'cc:preconj', 'ccomp', 'compound', 'compound:prt', 'conj', 'cop', 'csubj', 'csubj:outer', 'csubj:pass', 'dep', 'det', 'det:predet', 'discourse', 'dislocated', 'expl', 'fixed', 'flat', 'goeswith', 'iobj', 'list', 'mark', 'nmod', 'nmod:desc', 'nmod:poss', 'nmod:unmarked', 'nsubj', 'nsubj:outer', 'nsubj:pass', 'nummod', 'obj', 'obl', 'obl:agent', 'obl:unmarked', 'orphan', 'parataxis', 'punct', 'reparandum', 'root', 'vocative', 'xcomp'])}
+
+# Few-NERD. IO-tagged, so unlike wikiann/conll2003 there are no B-/I-
+# prefixes and no spans to recover -- build_reports drops span_level for it
+# automatically. "O" is present, so the binary entity view still applies.
+LABEL_DISPLAY_NAMES["fewnerd"] = {str(i): t for i, t in enumerate(['O', 'art', 'building', 'event', 'location', 'organization', 'other', 'person', 'product'])}
+LABEL_DISPLAY_NAMES["fewnerd_fine"] = {str(i): t for i, t in enumerate(['O', 'art-broadcastprogram', 'art-film', 'art-music', 'art-other', 'art-painting', 'art-writtenart', 'building-airport', 'building-hospital', 'building-hotel', 'building-library', 'building-other', 'building-restaurant', 'building-sportsfacility', 'building-theater', 'event-attack/battle/war/militaryconflict', 'event-disaster', 'event-election', 'event-other', 'event-protest', 'event-sportsevent', 'location-GPE', 'location-bodiesofwater', 'location-island', 'location-mountain', 'location-other', 'location-park', 'location-road/railway/highway/transit', 'organization-company', 'organization-education', 'organization-government/governmentagency', 'organization-media/newspaper', 'organization-other', 'organization-politicalparty', 'organization-religion', 'organization-showorganization', 'organization-sportsleague', 'organization-sportsteam', 'other-astronomything', 'other-award', 'other-biologything', 'other-chemicalthing', 'other-currency', 'other-disease', 'other-educationaldegree', 'other-god', 'other-language', 'other-law', 'other-livingthing', 'other-medical', 'person-actor', 'person-artist/author', 'person-athlete', 'person-director', 'person-other', 'person-politician', 'person-scholar', 'person-soldier', 'product-airplane', 'product-car', 'product-food', 'product-game', 'product-other', 'product-ship', 'product-software', 'product-train', 'product-weapon'])}
 
 
 class TokenizedExample(TypedDict):
@@ -413,9 +425,29 @@ def build_dataloaders(
         batch_size=batch_size,
         num_workers=num_workers,
         collate_fn=collate,
-        shuffle=shuffle,
+        sampler=length_sorted_order(ds["test"]),
         pin_memory=(device == "cuda"),
         persistent_workers=persistent,
     )
 
     return ds_train, ds_test
+
+
+def length_sorted_order(split) -> list[int]:
+    """Row order that batches sentences of similar length together.
+
+    collate pads to the longest row in the batch, so a batch drawn in dataset
+    order is mostly padding: at batch_size 64 wikiann's test split expands
+    from 256k real subwords to 857k padded ones (3.3x), and the encoder pays
+    for every one of them. Sorting by length brings that to 1.03x.
+
+    Applied to the test loader only. Evaluation is order-invariant -- every
+    metric is computed per sentence and then pooled, and SelectionLog's
+    sentence_id is a within-run grouping key that nothing joins back to
+    dataset rows -- so this changes runtime and nothing else. Training is
+    left alone deliberately: there the batch composition is part of the
+    gradient, so bucketing would change results and would belong under
+    `data.*` in the experiment signature rather than being a free speedup.
+    """
+    lengths = [len(row) for row in split["ids"]]
+    return sorted(range(len(lengths)), key=lengths.__getitem__)

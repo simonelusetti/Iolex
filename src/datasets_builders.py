@@ -50,6 +50,55 @@ def build_wikiann() -> DatasetDict:
     })
 
 
+# Few-NERD, the third NER corpus. Added to settle whether wikiann's sign flip
+# on the grounding correlation is a wikiann property or an NER one: with only
+# conll2003 and wikiann disagreeing, two corpora cannot break a tie.
+#
+# Two things make it a useful control rather than a third of the same thing.
+# It is IO-tagged, with no B-/I- prefixes at all, so every B-versus-I effect
+# this repo has measured is simply absent by construction -- which is worth
+# having, since that asymmetry has driven a lot of the NER results. And its
+# fine layer has 66 entity types against wikiann's 3, taking the critical |r|
+# from 0.75 down to about 0.24, so it can decide on its own what a 7-tag
+# corpus never can.
+FEWNERD_REPO = "DFKI-SLT/few-nerd"
+FEWNERD_CAP = 20_000
+FEWNERD_SEED = 0
+
+
+def _build_fewnerd(column: str) -> DatasetDict:
+    """Few-NERD supervised, capped to wikiann's size.
+
+    The cap is deliberate and part of the dataset's definition here. Few-NERD
+    ships 131k train and 56k test once validation is folded in the way this
+    repo folds it, which is 6x wikiann on the test side. Left uncapped it
+    would carry far less per-tag noise than every corpus it is being compared
+    against -- and the oracle, whose cost is linear in test sentences, would
+    run for days. Sampling is seeded and applied before any split-specific
+    work, so the subset is fixed and reproducible.
+    """
+    ds = load_dataset(FEWNERD_REPO, "supervised")
+    keep = {"tokens", column}
+    ds = ds.remove_columns([c for c in ds["train"].column_names if c not in keep])
+    if column != "labels":
+        ds = ds.rename_column(column, "labels")
+    train = ds["train"].shuffle(seed=FEWNERD_SEED).select(
+        range(min(FEWNERD_CAP, len(ds["train"]))))
+    test = concatenate_datasets([ds["validation"], ds["test"]]).shuffle(seed=FEWNERD_SEED)
+    test = test.select(range(min(FEWNERD_CAP, len(test))))
+    return DatasetDict({"train": train, "test": test})
+
+
+def build_fewnerd() -> DatasetDict:
+    """Coarse layer: O plus 8 entity types, the direct analogue of wikiann."""
+    return _build_fewnerd("ner_tags")
+
+
+def build_fewnerd_fine() -> DatasetDict:
+    """Fine layer: O plus 66 entity types, the well-powered version."""
+    return _build_fewnerd("fine_ner_tags")
+
+
 def build_conll2000() -> DatasetDict:
     # nltk ships the CoNLL-2000 shared-task data; the HF hub script and the
     # original clips.uantwerpen.be download URL have both gone stale.

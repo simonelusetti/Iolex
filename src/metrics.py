@@ -150,6 +150,7 @@ class SelectionLog:
         self.freq_table = freq_table
         self.label_to_idx: dict[str, int] = {}
         self._labels: list[np.ndarray] = []
+        self._token_ids: list[np.ndarray] = []
         self._log_freqs: list[np.ndarray] = []
         self._selected: list[list[np.ndarray]] = [[] for _ in self.rhos]
         self._sentence_ids: list[np.ndarray] = []
@@ -191,11 +192,38 @@ class SelectionLog:
         log_freqs = np.log1p([self.freq_table.get(int(t), 0) for t in ids_arr]).astype(np.float32)
 
         self._labels.append(label_idx)
+        self._token_ids.append(ids_arr.astype(np.int32))
         self._log_freqs.append(log_freqs)
         self._sentence_ids.append(sentence_ids.astype(np.int64))
         pred_np = pred_masks.detach().cpu().numpy() > 0.5
         for r in range(len(self.rhos)):
             self._selected[r].append(pred_np[r][valid])
+
+    def payload(self) -> dict[str, np.ndarray]:
+        """The whole record, ready for np.savez_compressed.
+
+        One row per *unit of selection* -- a word, since selection is
+        word-level and the caller gates this on the first-subword mask. That
+        makes it the only artifact from which per-word and per-word-type
+        analyses can be computed; every other artifact is already aggregated
+        over the corpus and cannot be disaggregated after the fact.
+
+        Cheap because it is a by-product: eval already assembles these arrays
+        to build the frequency-controlled effects, and previously discarded
+        them.
+        """
+        labels, log_freqs, selected, sentence_ids, names = self.arrays()
+        token_ids = (np.concatenate(self._token_ids) if self._token_ids
+                     else np.array([], dtype=np.int32))
+        return {
+            "rho": np.asarray(self.rhos, dtype=np.float32),
+            "token_id": token_ids,
+            "label": labels.astype(np.int16),
+            "label_names": np.asarray(names, dtype=object).astype("U"),
+            "log_freq": log_freqs.astype(np.float32),
+            "sentence_id": sentence_ids.astype(np.int32),
+            "selected": selected.astype(np.uint8),
+        }
 
     def arrays(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str]]:
         """Returns (labels [N], log_freqs [N], selected [R, N], sentence_ids [N], label_names)."""

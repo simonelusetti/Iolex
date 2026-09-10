@@ -37,7 +37,8 @@ ROOT = Path(__file__).resolve().parent.parent
 STORE = ROOT / "outputs" / "probe"
 
 TAGGED_DATASETS = {"wikiann", "conll2003", "conll2000", "movie_rationales",
-                   "ud_upos", "ud_deprel", "ud_discourse"}
+                   "ud_upos", "ud_deprel", "ud_discourse",
+                   "fewnerd", "fewnerd_fine"}
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,30 @@ def load(dataset: str, family: str) -> list[dict]:
         for path in sorted(root.glob("seed*/report.json"),
                            key=lambda p: int(p.parent.name.removeprefix("seed")))
     ]
+
+
+def checkpoint_for(report: dict) -> Path | None:
+    """The trained weights behind a cached report, or None.
+
+    Newly trained entries keep model.pth beside their report. Migrated ones
+    only record `migrated_from`, and that path goes stale whenever an
+    experiment is re-keyed (the tagger-config migration moved every signature),
+    so fall back to locating the run by its id -- run ids are unique across the
+    store and survive re-keying.
+    """
+    direct = STORE / report["dataset"] / report["family"] / f"seed{report['seed']}" / "model.pth"
+    if direct.exists():
+        return direct
+    src = report.get("migrated_from")
+    if not src:
+        return None
+    xp, run = src.split("/")
+    for candidate in (ROOT / "outputs/xps" / xp / run, *(ROOT / "outputs/xps").glob(f"*/{run}")):
+        found = sorted(candidate.glob("state/models/model_*.pth"),
+                       key=lambda q: int(q.stem.split("_")[1]))
+        if found:
+            return found[-1]
+    return None
 
 
 def tag_names(dataset: str) -> list[str]:

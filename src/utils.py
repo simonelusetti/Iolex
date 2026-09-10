@@ -39,19 +39,10 @@ def to_absolute_path(path: str | Path) -> Path:
 def remap_checkpoint_state_dict(state_dict: dict, model_state_dict: dict) -> dict:
     """Reconcile a saved state_dict with the live model's key naming.
 
-    Handles two sources of drift between the environment that trained a
-    checkpoint and the one loading it: a torch.compile `_orig_mod.` prefix,
-    and sentence-transformers renaming its wrapped HF module from `model` to
-    `auto_model` across versions.
+    Handles sentence-transformers renaming its wrapped HF module from `model`
+    to `auto_model` across versions.
     """
-    ckpt_compiled = any(k.startswith("_orig_mod.") for k in state_dict)
-    model_compiled = any(k.startswith("_orig_mod.") for k in model_state_dict)
-    if ckpt_compiled and not model_compiled:
-        remapped = {k.removeprefix("_orig_mod."): v for k, v in state_dict.items()}
-    elif model_compiled and not ckpt_compiled:
-        remapped = {f"_orig_mod.{k}": v for k, v in state_dict.items()}
-    else:
-        remapped = dict(state_dict)
+    remapped = dict(state_dict)
 
     if any(".auto_model." in k for k in model_state_dict) and not any(".auto_model." in k for k in remapped):
         remapped = {k.replace(".model.0.model.", ".model.0.auto_model."): v for k, v in remapped.items()}
@@ -129,7 +120,7 @@ def write_metrics_details(
         },
         "runtime": {
             "device": str(runtime_cfg.get("device", "")),
-            "compile": bool(runtime_cfg.get("compile", False)),
+            "tf32": bool(runtime_cfg.get("tf32", True)),
             "batch_size": int(runtime_data_cfg.get("batch_size", 0) or 0),
             "num_workers": int(runtime_data_cfg.get("num_workers", 0) or 0),
         },
@@ -206,6 +197,19 @@ def configure_runtime(runtime_cfg: dict) -> tuple[dict, bool]:
     ):
         torch.set_num_interop_threads(int(runtime_cfg["interop_threads"]))
         _interop_threads_configured = True
+
+    # Ada/Ampere tensor cores only engage for TF32, bf16 or fp16; a plain fp32
+    # matmul runs on the FP32 cores and leaves them idle. The dominant training
+    # cost is the encoder forward+backward through the mask, measured at 2.3x
+    # faster under TF32 with a gradient relative error of ~8e-4 -- orders of
+    # magnitude below seed-to-seed variance, and far better than bf16, which is
+    # no quicker here and ~30x less faithful. Lives under runtime (excluded
+    # from the experiment signature) alongside `device` and `oracle.precision`,
+    # the other knobs that trade exact numerics for compute.
+    tf32 = bool(runtime_cfg.get("tf32", True))
+    torch.backends.cuda.matmul.allow_tf32 = tf32
+    torch.backends.cudnn.allow_tf32 = tf32
+
     if runtime_cfg.get("device") == "cuda" and not torch.cuda.is_available():
         changed_device = True
 
@@ -215,9 +219,17 @@ def configure_runtime(runtime_cfg: dict) -> tuple[dict, bool]:
 
 
 def to_device(device: torch.device, batch: dict) -> dict:
+    """Move a collated batch to *device*.
+
+    non_blocking pairs with the loaders' pin_memory (src/data.py): without it
+    the pinning is paid for and never used, since a blocking copy cannot
+    overlap with compute. It is a no-op for unpinned or CPU tensors, and
+    subsequent work on the same stream orders itself against the copy, so
+    there is nothing to synchronise by hand.
+    """
     out: dict[str, Any] = {}
     for k, v in batch.items():
-        out[k] = v.to(device) if isinstance(v, torch.Tensor) else v
+        out[k] = v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v
     return out
 
 

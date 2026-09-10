@@ -12,7 +12,6 @@ globals:
   - "data.dataset=conll2003"
   - "runtime.data.batch_size=16"
   - "runtime.threads=24"
-  - "runtime.compile=true"
   - "train.continue=true"
 
 direct:

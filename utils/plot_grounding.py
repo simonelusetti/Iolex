@@ -137,9 +137,14 @@ def series_label(family: str, pooling: str | None, task: str = "rationale") -> s
     family and pooling with the selector it is the ceiling for, so without it
     the two would collide on one key and the dict would keep whichever was
     discovered last -- silently plotting one and dropping the other.
+
+    It is appended as another path segment ("bert/mean/oracle") rather than a
+    bracketed tag: labels are passed on the command line as Hydra list
+    elements, where brackets are list syntax and a space splits the argument
+    in the shell before Hydra ever sees it.
     """
     base = f"{family}/{pooling}" if pooling else family
-    return base if task == "rationale" else f"{base} [{task}]"
+    return base if task == "rationale" else f"{base}/{task}"
 
 
 def discover_series(dataset: str) -> list[dict]:

@@ -79,7 +79,10 @@ runtime:
   threads: 24
   interop_threads: 1
   device: "cpu"
-  compile: false   # torch.compile the selector model (first epoch slower)
+  # TF32 matmuls on CUDA. Off leaves the tensor cores idle for fp32 work;
+  # on is ~2.3x faster with a gradient relative error near 8e-4. See
+  # configure_runtime in src/utils.py. No effect on CPU.
+  tf32: true
   # Brute-force oracle search (src/oracle.py). Under runtime, and therefore
   # excluded from the experiment signature, for the same reason as seed:
   # these are compute-budget knobs, and forge snapshots runtime per run so
@@ -112,6 +115,10 @@ runtime:
     num_workers: 2
   eval:
     hard: true
+    # false skips the STS-B sufficiency sweep, a large share of a selector
+    # eval. Used when re-evaluating a finished run only to add an artifact it
+    # predates; the existing spearman_curves.json is then left untouched.
+    stsb: true
     short_log: false
     skip: false
     # STS-B sufficiency-test sweep (src/retrival_fun.py): a finer 20-point

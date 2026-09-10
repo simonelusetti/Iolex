@@ -1,0 +1,61 @@
+# Evaluation report settings (analysis.py). Kept out of conf/config.yaml so a
+# reporting option can never become part of an experiment's signature.
+#
+#   forge --config-dir utils --config-name analysis -M analysis run
+#   forge --config-dir utils --config-name analysis -M analysis run datasets=[ud_upos] labels.exclude=null
+#
+# Convention: null means "no filtering -- use everything available".
+# Any list narrows to exactly what it names.
+
+# null = every dataset with selector or oracle runs in the store.
+datasets: null
+
+# null = every series discovered. Narrow with a Hydra list and no spaces:
+#   series=[bert/mean,bert/mean/oracle]
+series: null
+
+# x axis. selection = observed rate - rho; division = signed z.
+metrics: null
+
+# signed = as measured; absolute = |value|, taken per run before averaging.
+variants: null
+
+# null = the rho-average plus every rho except 1.0, where keeping everything
+# forces the effect to zero by construction.
+rhos: null
+
+labels:
+  # Labels dropped before correlating. A real fork, not housekeeping: excluding
+  # "O" on wikiann takes 7 tags to 6 and flips division/signed for 2 of 3 seeds.
+  # null keeps every label -- what the UD corpora need, having no "O" at all.
+  exclude: ["special"]
+
+# true = one correlation per seed. false pools bias across seeds first, which
+# removes noise from x and inflates r; per-seed is the number to quote.
+per_seed: true
+
+# Test for the aggregate claim "every seed agrees on a weak r". The single-cell
+# critical value is the wrong bar for a mean over seeds; this relabels the tags
+# instead, applying one permutation to all seeds so their dependence is left
+# intact. Exact whenever n! <= max_exact (7 tags = 5040), sampled above it.
+permutation:
+  draws: 20000
+  max_exact: 50400
+
+plots:
+  # null = every kind. r_vs_rho: r against rho per dataset, one line per
+  # series. summary: series x dataset at one rho, the cross-experiment view.
+  # scatter: the per-tag points behind one cell, the sanity check.
+  kinds: null
+  # Which rho the summary and scatter views read. "avg" is the rho-average.
+  rho: "avg"
+  # Band around the multi-seed mean in r_vs_rho: sd or sem.
+  spread: "sd"
+
+output:
+  # null = stdout. json additionally writes a machine-readable copy carrying
+  # the resolved config.
+  path: null
+  json: null
+  # Directory for the figures. null = write none.
+  plots: null

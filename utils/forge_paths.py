@@ -106,7 +106,7 @@ def discover_strategies(dataset: str, tasks: tuple[str, ...] = ("rationale", "or
     disagree about what exists. Returns one dict per experiment with its
     label, family, pooling, task, signature and completed run directories.
 
-    The label carries a `[task]` suffix for anything that is not the plain
+    The label carries a `/<task>` suffix for anything that is not the plain
     trained selector: the brute-force oracle shares a family and pooling with
     the selector it is the ceiling for, so without it the two would collide
     on one key.
@@ -131,7 +131,7 @@ def discover_strategies(dataset: str, tasks: tuple[str, ...] = ("rationale", "or
         pooling = None if pooling is None else str(pooling)
         base = f"{family}/{pooling}" if pooling else family
         found.append({
-            "label": base if task == "rationale" else f"{base} [{task}]",
+            "label": base if task == "rationale" else f"{base}/{task}",
             "family": family,
             "pooling": pooling,
             "task": task,

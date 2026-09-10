@@ -131,12 +131,6 @@ class SelectorTrainer:
             sent_encoder=self.sent_encoder,
         ).to(self.device)
 
-        # No training loop to amortize the compile warmup over in eval-only
-        # (train.no_train) runs, so skip it there regardless of runtime.compile.
-        if cfg.runtime.get("compile", False) and not bool(cfg.train.get("no_train", False)):
-            self.model = torch.compile(self.model, dynamic=True)
-            logger.info("torch.compile enabled (first epoch will be slower).")
-
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=float(cfg.model.optim.lr),
@@ -387,7 +381,10 @@ class SelectorTrainer:
             searched = self.model.n_exhaustive + self.model.n_capped
             exhaustive_fraction = self.model.n_exhaustive / max(1, searched)
             self.extra_metrics["exhaustive_fraction"] = exhaustive_fraction
-            save_masks(self.data_dir / "oracle_masks.npz", self.rhos, selected_indices)
+            save_masks(
+                self.data_dir / "oracle_masks.npz", self.rhos, selected_indices,
+                row_order=list(getattr(self.test_dl, "sampler", []) or []),
+            )
             (self.data_dir / "oracle_summary.json").write_text(json.dumps({
                 "reconstruction_loss": eval_losses["eval_loss"],
                 "sentences": len(self.test_dl.dataset),
@@ -413,7 +410,12 @@ class SelectorTrainer:
         # All trained selectors get cross-corpus STS-B evaluation. Oracle
         # searches opt in because every pair requires another mask search.
         stsb = None
-        if not self.is_oracle or self.cfg.runtime.oracle.get("stsb", False):
+        # runtime.eval.stsb=false skips it: the sweep is a large share of a
+        # selector eval and is not needed when re-evaluating a finished run
+        # purely to add a missing artifact -- spearman_curves.json is already
+        # there and write_artifacts leaves it alone when stsb is None.
+        want_stsb = bool(self.cfg.runtime.eval.get("stsb", True))
+        if want_stsb and (not self.is_oracle or self.cfg.runtime.oracle.get("stsb", False)):
             base, ours, rand = run_stsb_sweep(
                 cfg=self.cfg, device=self.device, encoder=self.sent_encoder,
                 tokenizer=self.tokenizer, selector=self.model,
@@ -573,7 +575,7 @@ class SelectorTrainer:
 
 def main(cfg: DictConfig) -> int:
     if cfg.task not in ("rationale", "oracle"):
-        raise ValueError("train expects task=rationale or task=oracle; the tagger is not a forge entry point (see ner/).")
+        raise ValueError("train expects task=rationale or task=oracle; the tagger is not a forge entry point (see tagger/).")
     start_capture = start_run_metrics_capture()
 
     # start_run() registers the run and chdirs into its output directory, so

@@ -47,6 +47,7 @@ import itertools
 import os
 import math
 import sys
+from collections.abc import Sequence
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
@@ -310,14 +311,23 @@ def build_progress(dataset, rhos, cfg) -> tqdm:
     )
 
 
-def save_masks(path: Path, rhos, per_rho_indices: list[list[np.ndarray]]) -> None:
+def save_masks(path: Path, rhos, per_rho_indices: list[list[np.ndarray]],
+               row_order: Sequence[int] | None = None) -> None:
     """Persist the winning masks as flat indices plus per-sentence offsets.
 
     Ragged by nature (one variable-length index list per sentence per rho),
     so a flat array with an offsets vector rather than an object array --
     compact, and loadable without pickle.
+
+    Sentences appear in *test-loader* order, which is sorted by length rather
+    than by dataset row (see length_sorted_order in src/data.py). `row_order`
+    records that permutation so position i here maps to dataset row
+    row_order[i]; without it the artifact would silently look as though it
+    were in dataset order.
     """
     payload = {"rho": np.asarray([float(r) for r in rhos], dtype=np.float32)}
+    if row_order is not None:
+        payload["row_order"] = np.asarray(row_order, dtype=np.int64)
     for r, per_sentence in enumerate(per_rho_indices):
         flat = np.concatenate(per_sentence) if per_sentence else np.zeros(0, dtype=np.int32)
         offsets = np.cumsum([0] + [len(a) for a in per_sentence]).astype(np.int64)
