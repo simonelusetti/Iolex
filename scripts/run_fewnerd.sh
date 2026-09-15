@@ -26,7 +26,8 @@ for DS in $DATASETS; do
     echo "[$(date -Is)] --- $DS tagger ---"
     .venv/bin/python -m tagger "$DS" --family bert --seeds 0,1,2 --device cuda \
         --set runtime.data.batch_size=32
-    echo "[$(date -Is)] TAGGER_${DS}_EXIT=$?"
+    rc=$?
+    echo "[$(date -Is)] TAGGER_${DS}_EXIT=$rc"
 done
 
 for DS in $DATASETS; do
@@ -36,7 +37,8 @@ for DS in $DATASETS; do
         runtime.device=cuda runtime.grid=true runtime.data.batch_size=16 \
         train.continue=true \
         --sweep runtime.seed=0,1,2
-    echo "[$(date -Is)] SELECTOR_${DS}_EXIT=$?"
+    rc=$?
+    echo "[$(date -Is)] SELECTOR_${DS}_EXIT=$rc"
 done
 
 # forge grid marks a failed entry and still exits 0, so ask the store instead.

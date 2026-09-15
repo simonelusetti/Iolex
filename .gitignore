@@ -2,6 +2,7 @@
 __pycache__/
 data/*
 outputs/
+analysis/
 ratcon/__pycache__
 playground.ipynb
 test.sbatch

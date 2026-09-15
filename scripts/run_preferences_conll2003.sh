@@ -19,4 +19,5 @@ export MPLCONFIGDIR="$PWD/outputs/matplotlib-cache"
 mkdir -p "$HF_DATASETS_CACHE" "$MPLCONFIGDIR"
 
 .venv/bin/forge grid --file utils/grid_preferences_conll2003.yaml runtime.device=cuda
-echo "[$(date -Is)] GRID_EXIT=$?"
+rc=$?
+echo "[$(date -Is)] GRID_EXIT=$rc"

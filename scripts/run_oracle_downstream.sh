@@ -38,7 +38,8 @@ echo "[$(date -Is)] === taggers ==="
 .venv/bin/python -m tagger movie_rationales \
     --family bert --seeds 0,1,2 --device cuda --class-weighted \
     --set runtime.data.batch_size=16
-echo "[$(date -Is)] PROBES_EXIT=$?"
+rc=$?
+echo "[$(date -Is)] PROBES_EXIT=$rc"
 
 echo "[$(date -Is)] === oracles (rho=0.8) ==="
 .venv/bin/forge grid task=oracle \
@@ -48,4 +49,5 @@ echo "[$(date -Is)] === oracles (rho=0.8) ==="
     --run data.dataset=conll2003 \
     --run data.dataset=conll2000 \
     --run data.dataset=movie_rationales runtime.oracle.chunk_tokens=65536
-echo "[$(date -Is)] ORACLES_EXIT=$?"
+rc=$?
+echo "[$(date -Is)] ORACLES_EXIT=$rc"

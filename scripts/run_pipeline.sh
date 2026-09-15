@@ -54,13 +54,15 @@ for DS in ud_upos ud_deprel ud_discourse; do
     echo "[$(date -Is)] --- $DS tagger ---"
     .venv/bin/python -m tagger "$DS" --family bert --seeds 0,1,2 --device cuda \
         --set runtime.data.batch_size=32
-    echo "[$(date -Is)] TAGGER_${DS}_EXIT=$?"
+    rc=$?
+    echo "[$(date -Is)] TAGGER_${DS}_EXIT=$rc"
 
     echo "[$(date -Is)] --- $DS selector ---"
     .venv/bin/forge grid data.dataset="$DS" data.encoder.family=bert data.encoder.pooling=mean \
         runtime.device=cuda runtime.grid=true runtime.data.batch_size=16 train.continue=true \
         --sweep runtime.seed=0,1,2
-    echo "[$(date -Is)] SELECTOR_${DS}_EXIT=$?"
+    rc=$?
+    echo "[$(date -Is)] SELECTOR_${DS}_EXIT=$rc"
 done
 
 echo "[$(date -Is)] === 5/5  remaining wikiann oracles (~3h each, longest pole, so last) ==="

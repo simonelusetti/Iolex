@@ -141,15 +141,19 @@ def bert_token_embeddings(
     model: AutoModel,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
+    layer_index: int | None = None,
 ) -> torch.Tensor:
     """
-    Returns last hidden states [B, T, D] for BERT-style encoders.
+    Returns hidden states [B, T, D] for BERT-style encoders.
+    layer_index=None uses all blocks; 0 returns embeddings, N runs N blocks.
     Adds log(attention_mask) to attention scores, supporting fractional weights.
     """
+    if layer_index is not None and not 0 <= layer_index <= len(model.encoder.layer):
+        raise ValueError(f"Invalid BERT layer index: {layer_index}")
     hidden_states = model.embeddings(input_ids)
     key_mask = attention_mask[:, None, None, :].type_as(hidden_states)  # [B,1,1,T]
 
-    for layer in model.encoder.layer:
+    for layer in model.encoder.layer[:layer_index]:
         attn = layer.attention.self
         bsz, seq_len, _ = hidden_states.size()
 

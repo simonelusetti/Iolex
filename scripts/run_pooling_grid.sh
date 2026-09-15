@@ -18,42 +18,30 @@ set -u
 cd "$(dirname "$0")/.."
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-DATASETS="conll2003 ud_upos ud_deprel ud_discourse"
+# Overridable so the same verified path can backfill a corpus that was
+# skipped the first time round:  DATASETS=wikiann bash scripts/run_pooling_grid.sh
+DATASETS="${DATASETS:-conll2003 ud_upos ud_deprel ud_discourse}"
 SEEDS="${SEEDS:-0,1,2}"
-ORACLE_SEEDS="${ORACLE_SEEDS:-}"     # empty = one unseeded oracle per cell
 
-echo "[$(date -Is)] selector seeds=$SEEDS  oracle seeds=${ORACLE_SEEDS:-<single>}"
+echo "[$(date -Is)] selector seeds=$SEEDS"
 
-echo "[$(date -Is)] === 1/2  selectors: bert min/max, seeds $SEEDS ==="
+echo "[$(date -Is)] === selectors: bert min/max, seeds $SEEDS ==="
 for DS in $DATASETS; do
     echo "[$(date -Is)] --- $DS selector min/max ---"
     .venv/bin/forge grid data.dataset="$DS" data.encoder.family=bert \
         runtime.device=cuda runtime.grid=true runtime.data.batch_size=16 \
         train.continue=true \
         --sweep data.encoder.pooling=min,max --sweep runtime.seed="$SEEDS"
-    echo "[$(date -Is)] SELECTOR_${DS}_EXIT=$?"
+    rc=$?
+    echo "[$(date -Is)] SELECTOR_${DS}_EXIT=$rc"
 done
 
-# Oracles last: they are the long pole by an order of magnitude. Measured
-# candidate counts at the configured caps, and ~3k masks/s:
-#   conll2003 180M (~17h)   ud_upos 84M (~8h)
-#   ud_deprel  84M (~8h)    ud_discourse 114M (~11h)
-# That is ~43h per pooling per seed, and pooling does not change the count --
-# only what each candidate is scored with.
-echo "[$(date -Is)] === 2/2  oracles: bert min/max ==="
-for DS in $DATASETS; do
-    echo "[$(date -Is)] --- $DS oracle min/max ---"
-    if [ -n "$ORACLE_SEEDS" ]; then
-        .venv/bin/forge grid task=oracle data.dataset="$DS" data.encoder.family=bert \
-            runtime.device=cuda runtime.data.batch_size=128 \
-            --sweep data.encoder.pooling=min,max --sweep runtime.seed="$ORACLE_SEEDS"
-    else
-        .venv/bin/forge grid task=oracle data.dataset="$DS" data.encoder.family=bert \
-            runtime.device=cuda runtime.data.batch_size=128 \
-            --sweep data.encoder.pooling=min,max
-    fi
-    echo "[$(date -Is)] ORACLE_${DS}_EXIT=$?"
-done
+# The oracle phase used to live here and has been removed. Measured cost was
+# ~43h per pooling at the configured caps (conll2003 180M candidate masks,
+# ud_discourse 114M, ud_upos and ud_deprel 84M each), against ~2h for all 24
+# selector runs. It was cancelled mid-conll2003; nothing partial survives, the
+# run was purged. Re-add with `forge grid task=oracle ...` when the ceiling is
+# actually needed -- the grounding correlation does not use it.
 
 # forge grid marks a failed entry and still exits 0, so an exit code above
 # proves nothing. Ask the store what actually finished.

@@ -135,6 +135,36 @@ python3 -m tagger wikiann --family bert --seeds 0,1,2 --device cuda
 python3 -m tagger movie_rationales --family bert --seeds 0,1,2 --class-weighted
 ```
 
+To compare every frozen BERT layer on a tagged dataset, run
+`python3 -m tagger.layers <dataset> --device cuda` (dataset defaults to
+`wikiann`; `fewnerd` and `fewnerd_fine` work too). This reuses the tagger's
+training and evaluation code and trains fresh MLPs sequentially
+with the same seed (default 0) and training settings: layer 0 is the embedding
+output, layers 1–12 are transformer-block outputs. Each layer saves one final
+`model.pth` and a `report.json` with per-epoch loss/F1 under
+`outputs/probe_layers/<dataset>/bert/seed0/layer<N>/`, separate from the usual
+probe cache. Rerunning skips completed layers with matching configuration;
+an interrupted layer restarts. Use `--seed`, `--epochs`, `--batch-size`, or
+`--output-root` to override those settings.
+
+After the layer sweep, `python3 -m utils.word_layer_analysis <dataset> --device cuda`
+scores every held-out word with all 13 probes. It writes occurrence-level
+predictions/correctness, exact-spelling word-type accuracies and label entropies,
+tie-aware best-layer percentages, and Spearman correlations to
+`analysis/word_layers/<dataset>/seed0/`. Both full original labels and binary entity/O
+scoring are included, with frequency-filtered and all-layer-tie sensitivity
+checks; `summary.md` explains the definitions and contains the result tables.
+Use `--seed` to select a different seed, or `--probes` to select a custom probe
+directory. The analysis reads the training configuration and labels from the
+saved reports; binary analysis requires an `O` label.
+
+`python3 -m utils.entropy_layer_curves wikiann fewnerd` reuses those tables
+without inference. It groups layer-accuracy curves by **training-label entropy**
+and compares against a training-only word-majority baseline, in full and binary
+regimes. Plots (PNG/PDF), per-word data, and tables go in each dataset's
+`analysis/word_layers/<dataset>/seed0/contextual_gain/`. Main plots require 10
+occurrences in each split (`--min-count`); unseen words are reported separately.
+
 Entries that already exist are loaded, not retrained, so re-running is free
 and safe; pass `--retrain` to force. From Python it is one call, which trains
 whatever is missing and returns one report per seed:
