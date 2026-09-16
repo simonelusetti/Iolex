@@ -1,0 +1,35 @@
+# STS-B sufficiency sweep -- panels 1 and 2 of the STS-B figure.
+#
+#   forge grid --file utils/grid_stsb.yaml
+#
+# Five encoders x three seeds. Because runtime.seed is in forge.exclude
+# (conf/config.yaml), the three seeds of an encoder land as three *runs* of one
+# experiment, which is what plot_stsb_sufficiency.py expects: it groups by
+# experiment and treats every run under it as a seed.
+#
+# llm (pythia) is deliberately NOT in the product. Its selector cannot train:
+# gpt_token_embeddings (src/sentence.py) hands the mask to HuggingFace's own
+# forward, which rebuilds it as an additive bias and detaches it -- the output
+# comes back with requires_grad=False, so the selector has no path to the loss.
+# The BERT-stack encoders go through bert_token_embeddings instead, a hand-
+# written attention loop that adds log(attention_mask) to the scores and keeps
+# fractional weights differentiable. Including llm here would burn the compute
+# and produce a curve for an untrained selector indistinguishable from random.
+# It remains available as an oracle, which needs no gradient.
+#
+# pooling is pinned to mean so these runs are comparable with the rest of the
+# (dataset x encoder) grid rather than silently inheriting a default.
+#
+# Panel 3 (cross-corpus) needs nothing from this file: every training run is
+# STS-B-evaluated at the end (runtime.eval.stsb=true by default), so each of the
+# tagging experiments already carries data/spearman_curves.json.
+globals:
+  - "runtime.grid=true"
+  - "data.dataset=stsb"
+  - "data.encoder.pooling=mean"
+  - "runtime.device=cuda"
+  - "runtime.data.batch_size=16"
+  - "train.continue=true"
+product:
+  data.encoder.family: [bert, electra, roberta, sbert, e5]
+  runtime.seed: [0, 1, 2]

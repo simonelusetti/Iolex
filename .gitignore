@@ -31,6 +31,5 @@ iolex-release.zip
 
 # Exploratory scripts/outputs from the paper push, not part of the
 # reproducibility path (see README.md for the scripts that are).
-old/
 plots/
 state/

@@ -199,6 +199,11 @@ def build_dataset_report(a, dataset: str) -> dict:
     max_exact = int(getattr(perm_cfg, "max_exact", 50400) or 50400) if perm_cfg else 50400
     perms, exact = permutation_matrix(len(tags), draws, max_exact)
 
+    auc_cfg = None
+    if "auc" in a and a.auc is not None and bool(a.auc.get("enabled", False)):
+        auc_cfg = {"device": a.auc.get("device", None),
+                   "min_class": int(a.auc.get("min_class", 10))}
+
     store = ExperimentStore(root=ROOT / "outputs")
     found = {s["label"]: s for s in discover_series(dataset)}
     available = sorted(found)
@@ -269,6 +274,9 @@ def build_dataset_report(a, dataset: str) -> dict:
                         "critical_r_mean": crit_mean,
                         "sign_agree": agree, "sign_n": total, "p_sign": p_sign})
 
+        auc_block = (_series_auc(dataset, entry, runs, store, report["rhos"], exclude, auc_cfg)
+                     if auc_cfg is not None else None)
+
         report["series"][label] = {
             "signature": entry["signature"],
             "family": entry["family"],
@@ -280,8 +288,91 @@ def build_dataset_report(a, dataset: str) -> dict:
             "cells": cells,
             "aggregate": agg,
         }
+        if auc_block is not None:
+            report["series"][label]["auc"] = auc_block
     report["n_cells"] = sum(len(s["cells"]) for s in report["series"].values())
     return report
+
+
+def _series_auc(dataset, entry, runs, store, rho_labels, exclude, auc_cfg) -> dict:
+    """Within-label word-level AUC for every run of one series (see utils/word_auc.py)."""
+    from utils.word_auc import probe_words, run_auc
+
+    probe, why = probe_words(dataset, entry["family"], auc_cfg["device"])
+    if probe is None:
+        return {"cells": [], "runs": [], "skipped": [{"run": "all", "seed": "-", "reason": why}]}
+    cells, meta, skipped = [], [], []
+    for path in runs:
+        seed = str(_seed_of(store, path))
+        result, why = run_auc(path, probe, rho_labels, exclude, auc_cfg["min_class"])
+        if result is None:
+            skipped.append({"run": f"{path.parent.name}/{path.name}", "seed": seed, "reason": why})
+            continue
+        meta.append({"seed": seed, "order": result["order"], "n_words": result["n_words"],
+                     "probe_accuracy": result["accuracy"]})
+        cells.extend({"seed": seed, "rho": rho, **result[rho]} for rho in rho_labels if rho in result)
+    return {"cells": cells, "runs": meta, "skipped": skipped, "min_class": auc_cfg["min_class"]}
+
+
+def _render_auc(report: dict, p) -> None:
+    series = {k: v["auc"] for k, v in report["series"].items() if "auc" in v}
+    if not series:
+        return
+    rhos = report["rhos"]
+    head = f"{'series':22s}{'seed':>6s}" + "".join(f"{r:>8s}" for r in rhos)
+    p("\n" + "#" * len(head))
+    p("within-label AUC, word level  --  P(kept longer | probe correct)")
+    p("  0.5 = no relation; >0.5 = the selector keeps the words the tagger gets right.")
+    p("  score: fraction of rhos kept (avg), or kept at that rho. outcome: probe ensemble")
+    p("  correct. macro = mean over labels with enough right AND wrong words.")
+    p("#" * len(head))
+    p(head)
+    for label, block in series.items():
+        by_seed: dict[str, dict] = {}
+        for c in block["cells"]:
+            by_seed.setdefault(c["seed"], {})[c["rho"]] = c
+        first = True
+        for seed, row in by_seed.items():
+            p(f"{label if first else '':22s}{seed:>6s}"
+              + "".join(f"{row[r]['macro']:8.3f}" if r in row else f"{'':>8s}" for r in rhos))
+            first = False
+        if len(by_seed) > 1:
+            for stat, fn in (("mean", np.nanmean), ("sd", lambda v: np.nanstd(v, ddof=1))):
+                vals = [fn([by_seed[s][r]["macro"] for s in by_seed if r in by_seed[s]])
+                        if any(r in by_seed[s] for s in by_seed) else float("nan") for r in rhos]
+                p(f"{'':22s}{stat:>6s}" + "".join(f"{v:8.3f}" for v in vals))
+        avg = [c for c in block["cells"] if c["rho"] == "avg"]
+        if avg:
+            p(f"{'':22s}  avg: weighted {np.nanmean([c['weighted'] for c in avg]):.3f}"
+              f"   pooled {np.nanmean([c['pooled'] for c in avg]):.3f} (confounded by label mix)"
+              f"   labels {avg[0]['n_labels']}/{avg[0]['n_labels_total']}"
+              f"   words {block['runs'][0]['n_words']:,}"
+              f"   probe acc {block['runs'][0]['probe_accuracy']:.3f}")
+        for sk in block["skipped"]:
+            p(f"{'':22s}  skipped {sk['run']} (seed {sk['seed']}): {sk['reason']}")
+
+
+def render_auc_summary(report: dict, out) -> None:
+    """series x dataset, macro AUC at rho=avg, mean over seeds."""
+    p = lambda *a: print(*a, file=out)
+    names = [n for n, d in report["datasets"].items()
+             if any("auc" in s for s in d["series"].values())]
+    if not names:
+        return
+    labels = sorted({lab for n in names for lab, s in report["datasets"][n]["series"].items()
+                     if "auc" in s})
+    width = max(9, max(len(n) for n in names) + 1)
+    p("=" * (22 + width * len(names)))
+    p("AUC SUMMARY   within-label macro AUC at rho=avg, mean over seeds  (0.5 = no relation)")
+    p("=" * (22 + width * len(names)))
+    p(f"{'series':22s}" + "".join(f"{n:>{width}s}" for n in names))
+    for lab in labels:
+        row = ""
+        for n in names:
+            s = report["datasets"][n]["series"].get(lab)
+            vals = [c["macro"] for c in (s or {}).get("auc", {}).get("cells", []) if c["rho"] == "avg"]
+            row += f"{np.nanmean(vals):>{width}.3f}" if vals else f"{'-':>{width}s}"
+        p(f"{lab:22s}{row}")
 
 
 def build_global(report: dict, draws: int = 20000, seed: int = 0) -> dict:
@@ -390,6 +481,8 @@ def render_text(report: dict, out) -> None:
     if report.get("global"):
         print(file=out)
         render_global(report["global"], out)
+    print(file=out)
+    render_auc_summary(report, out)
 
 
 def render_dataset(report: dict, out) -> None:
@@ -423,6 +516,8 @@ def render_dataset(report: dict, out) -> None:
 
         if s.get("aggregate"):
             _render_aggregate(s["aggregate"], rhos, p)
+
+    _render_auc(report, p)
 
 
 def _render_aggregate(agg: list[dict], rhos: list[str], p) -> None:

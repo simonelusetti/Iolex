@@ -1,14 +1,8 @@
-# Experiment management. forge is not on PyPI -- clone it and install it
-# editable alongside this repo (see README.md "Setup"):
-#     git clone https://github.com/simonelusetti/forge.git ../forge
-#     pip install -e ../forge
-# It pulls in hydra-core, omegaconf, prettytable, pyyaml and argcomplete,
-# which is why those are no longer pinned here.
-
 datasets==4.0.0
 matplotlib==3.10.9
 nltk==3.10.0
 numpy==2.2.6
+omegaconf==2.3.0
 scikit-learn==1.7.2
 scipy==1.15.3
 sentence-transformers==5.1.0

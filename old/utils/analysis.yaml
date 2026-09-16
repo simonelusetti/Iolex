@@ -42,6 +42,18 @@ permutation:
   draws: 20000
   max_exact: 50400
 
+# Within-label word-level AUC: does the selector keep the words the tagger gets
+# right? Printed as its own table per dataset plus a series x dataset summary.
+# The first run per (dataset, encoder) scores every test word with the probe
+# and caches it next to the probe; later runs only read that cache.
+auc:
+  enabled: true
+  # null = cuda when available. Only used when that cache has to be built.
+  device: null
+  # A label counts toward the macro AUC only with at least this many correctly
+  # AND this many wrongly tagged words; below that its AUC is mostly noise.
+  min_class: 10
+
 plots:
   # null = every kind. r_vs_rho: r against rho per dataset, one line per
   # series. summary: series x dataset at one rho, the cross-experiment view.
