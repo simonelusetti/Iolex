@@ -35,6 +35,14 @@ ALIASES = {
     "roberta": {"roberta"},
     "sbert": {"sbert"},
     "e5": {"e5", "retrieval", "gte"},
+    # SimCSE: the other lineage of purpose-built sentence encoder. Unlike e5 it is
+    # NOT a retrieval model -- supervised contrastive training on NLI, no
+    # query:/passage: prefix convention, so none of e5's prefix handling applies.
+    # And unlike sbert (a 6-layer 384-dim distilled MiniLM) it is a full BERT-base
+    # stack on the same WordPiece vocabulary, so it sits in the bert-base
+    # tokenizer group and its per-tag counts -- hence its null distribution --
+    # match bert, electra and sbert cell for cell.
+    "simcse": {"simcse"},
     "llm": {"llm"},
 }
 
@@ -50,6 +58,7 @@ DEFAULT_MODEL_NAMES = {
     "roberta": "roberta-base",
     "sbert": "sentence-transformers/all-MiniLM-L6-v2",
     "e5": "intfloat/e5-base-v2",
+    "simcse": "princeton-nlp/sup-simcse-bert-base-uncased",
     "llm": "EleutherAI/pythia-410m",
 }
 
@@ -57,7 +66,8 @@ TOKENIZER_GROUPS = {
     # electra sits in the bert-base group because its tokenizer is the same
     # WordPiece vocabulary, verified to produce identical ids; roberta needs
     # its own because BPE does not.
-    "bert-base": {"bert", "bert-base", "electra", "sbert", "e5", "retrieval", "gte"},
+    "bert-base": {"bert", "bert-base", "electra", "sbert", "e5", "retrieval", "gte",
+                  "simcse"},
     "roberta": {"roberta"},
     "gpt": {"llm"},
 }
@@ -182,15 +192,65 @@ def gpt_token_embeddings(
     attention_mask: torch.Tensor,
 ) -> torch.Tensor:
     """
-    Returns last hidden states [B, T, D] for GPT-style encoders.
-    HuggingFace causal models compute the additive bias as (1 - mask) * -inf,
-    so values outside [0, 1] produce incorrect biases (+inf for mask > 1).
-    Clamping guards against soft z values that can exceed 1.
+    Returns last hidden states [B, T, D] for GPT-NeoX-style causal encoders,
+    keeping FRACTIONAL attention_mask values differentiable.
+
+    Why this is hand-written rather than a call to model(...): HuggingFace turns
+    attention_mask into an additive bias inside create_causal_mask(), which
+    treats it as a boolean keep/drop and detaches it. Passing a soft selector
+    weight through that path produced an output with requires_grad=False, so the
+    selector got no gradient and could never train -- which is why llm runs only
+    ever existed as oracles. This mirrors bert_token_embeddings: add
+    log(attention_mask) to the attention scores, so a weight of 1 contributes 0,
+    a weight of 0 contributes -inf, and anything between is a smooth
+    down-weighting the selector can be optimised through.
+
+    The causal mask is applied on top of it. Everything else -- the fused QKV
+    projection and its [B, T, H, 3*head] layout, partial rotary over the first
+    rotary_ndims dimensions, and the parallel residual -- follows
+    modeling_gpt_neox exactly, and is checked against the HF forward in
+    tests/test_gpt_mask.py for an all-ones mask.
     """
-    return model(
-        input_ids=input_ids,
-        attention_mask=attention_mask.clamp(0.0, 1.0),
-    ).last_hidden_state
+    from transformers.models.gpt_neox.modeling_gpt_neox import apply_rotary_pos_emb
+
+    hidden_states = model.emb_dropout(model.embed_in(input_ids))
+    bsz, seq_len, _ = hidden_states.shape
+
+    position_ids = torch.arange(seq_len, device=hidden_states.device).unsqueeze(0)
+    cos, sin = model.rotary_emb(hidden_states, position_ids)
+
+    # -inf above the diagonal: a token may not attend to its own future.
+    causal = torch.full((seq_len, seq_len), float("-inf"), device=hidden_states.device,
+                        dtype=hidden_states.dtype).triu(1)
+    # log(w): 0 where fully kept, -inf where dropped, smooth in between. Clamped
+    # because the selector's soft z can sit marginally outside [0, 1].
+    key_bias = torch.log(attention_mask.clamp(1e-9, 1.0)).type_as(hidden_states)
+    attn_bias = causal[None, None, :, :] + key_bias[:, None, None, :]
+
+    for layer in model.layers:
+        attn = layer.attention
+        residual = hidden_states
+        normed = layer.input_layernorm(hidden_states)
+
+        qkv = attn.query_key_value(normed).view(bsz, seq_len, -1, 3 * attn.head_size).transpose(1, 2)
+        q, k, v = qkv.chunk(3, dim=-1)
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        with _sdpa_context(hidden_states.device):
+            context = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_bias,
+                                                     scale=attn.scaling)
+        context = context.transpose(1, 2).reshape(bsz, seq_len, -1)
+        attn_out = layer.post_attention_dropout(attn.dense(context))
+
+        if layer.use_parallel_residual:            # pythia: x + attn(ln1(x)) + mlp(ln2(x))
+            mlp_out = layer.post_mlp_dropout(layer.mlp(layer.post_attention_layernorm(residual)))
+            hidden_states = mlp_out + attn_out + residual
+        else:
+            attn_out = attn_out + residual
+            mlp_out = layer.post_mlp_dropout(layer.mlp(layer.post_attention_layernorm(attn_out)))
+            hidden_states = mlp_out + attn_out
+
+    return model.final_layer_norm(hidden_states)
 
 
 # -----------------------------------------------------------------------------
@@ -204,7 +264,7 @@ def gpt_token_embeddings(
 # varying the strategy is what isolates whether a token-selection bias is a
 # property of the representation or of the reduction applied to it.
 
-POOLING_STRATEGIES = ("mean", "max", "min", "last")
+POOLING_STRATEGIES = ("mean", "max", "min", "last", "cls")
 
 def masked_pool(
     token_emb: torch.Tensor,
@@ -226,6 +286,11 @@ def masked_pool(
     last: last positive-score position; a hard index, so it passes no
     gradient to the scores at all and the selector trains through the
     attention path alone. Empty selections produce zeros.
+    cls: position 0, i.e. the [CLS] token, for encoders trained against it
+    (SimCSE). Needs model.keep_special=true. Like `last` it is a fixed index and
+    passes no gradient to the scores, so the selector trains purely through what
+    the mask does to attention -- which is the whole mechanism here, since CLS's
+    own representation is built by attending over the surviving tokens.
 
     valid_mask marks real tokens so batch padding stays out of the extrema.
     It only bites when nothing is deselected (pool_full, or rho = 1): once
@@ -254,11 +319,29 @@ def masked_pool(
             pooled = torch.where(valid.any(dim=1), pooled, torch.zeros_like(pooled))
         return pooled
 
-    # strategy == "last"
-    occupied = mask.sum(dim=1) > 0
+    if strategy == "cls":
+        # Position 0, which is the [CLS] token -- so this requires
+        # model.keep_special=true, since strip_special_tokens() otherwise removes
+        # it and position 0 would be the first ordinary word instead. The token is
+        # not a word, so the selector never votes on it; RationaleSelectorModel
+        # keeps every attended non-word position unmasked so that CLS survives
+        # into the suppressed sentence and the loss compares CLS-of-full against
+        # CLS-of-suppressed. No mask weighting is applied here for the same
+        # reason: CLS is always present on both sides.
+        return token_emb[:, 0]
+
+    # strategy == "last": the TRUE last real token of the sequence -- the last
+    # position of valid_mask -- whatever the selector kept. Before 2026-10-09
+    # this was the last KEPT token (last position of pool_mask), so a selector
+    # that dropped the final word was compared against the full sentence's
+    # last-token state using an earlier token's state. Pair with
+    # model.selector.keep_last, which guarantees that token is never masked.
+    # Without valid_mask (pool_full, where nothing is masked) the pooling mask
+    # marks exactly the real tokens, so it is used instead.
+    real = (valid_mask if valid_mask is not None else pool_mask) > 0
+    occupied = real.any(dim=1, keepdim=True)
     positions = torch.arange(token_emb.shape[1], device=token_emb.device)
-    selected = (mask.squeeze(-1) > 0).to(token_emb.dtype)
-    last_idx = (selected * (positions + 1).to(token_emb.dtype)).max(dim=1).values.long() - 1
+    last_idx = (real.to(token_emb.dtype) * (positions + 1).to(token_emb.dtype)).max(dim=1).values.long() - 1
     pooled = token_emb[torch.arange(token_emb.shape[0], device=token_emb.device), last_idx.clamp(min=0)]
     return torch.where(occupied, pooled, torch.zeros_like(pooled))
 
@@ -327,6 +410,7 @@ class FrozenSBERT(SentenceEncoder):
 class _FrozenHFEncoder(SentenceEncoder):
     def __init__(self, model_name: str, normalize: bool, pooling: str = "mean") -> None:
         super().__init__(normalize, pooling)
+        self.model_name = model_name
         self.model = AutoModel.from_pretrained(model_name)
 
         self.model.eval()
@@ -362,6 +446,10 @@ class FrozenE5(_BertStackEncoder):
     pass
 
 
+class FrozenSimCSE(_BertStackEncoder):
+    pass
+
+
 class FrozenLLMEncoder(_FrozenHFEncoder):
     """Causal encoder.
 
@@ -378,6 +466,25 @@ class FrozenLLMEncoder(_FrozenHFEncoder):
     def token_embeddings(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
         return gpt_token_embeddings(self.model, input_ids, attention_mask)
 
+    def next_token_logits(self, state: torch.Tensor) -> torch.Tensor:
+        """Next-token logits from final-layer states (the output of token_embeddings).
+
+        Pythia's own output layer (embed_out), frozen and loaded on first use.
+        Deliberately NOT a registered submodule: the selector holds this encoder
+        as a child, so a registered head would enter every checkpoint and the
+        optimizer's parameter list.
+        """
+        head = self.__dict__.get("_lm_head")
+        if head is None:
+            from transformers import AutoModelForCausalLM
+            head = AutoModelForCausalLM.from_pretrained(self.model_name).embed_out.eval()
+            for prm in head.parameters():
+                prm.requires_grad = False
+            self.__dict__["_lm_head"] = head
+        if next(head.parameters()).device != state.device:
+            head.to(state.device)
+        return head(state)
+
 
 # -----------------------------------------------------------------------------
 # Builder
@@ -392,6 +499,7 @@ ENCODER_CLASSES = {
     "roberta": FrozenRoBERTa,
     "sbert": FrozenSBERT,
     "e5": FrozenE5,
+    "simcse": FrozenSimCSE,
     "llm": FrozenLLMEncoder,
 }
 

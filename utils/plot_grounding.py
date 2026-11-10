@@ -70,6 +70,7 @@ from forge.core import ExperimentStore  # noqa: E402
 
 import tagger
 from src.data import LABEL_DISPLAY_NAMES  # noqa: E402
+from utils.forge_paths import variant_suffix  # noqa: E402
 from utils._common import (  # noqa: E402
     ENCODER_COLOR,
     SENTENCE_ENCODERS,
@@ -127,7 +128,8 @@ GROUNDING_GROUPS = {
 }
 
 
-def series_label(family: str, pooling: str | None, task: str = "rationale") -> str:
+def series_label(family: str, pooling: str | None, task: str = "rationale",
+                 suffix: str = "") -> str:
     """`bert/max` for an explicit strategy, bare `sbert` for a trained one.
 
     Runs made before data.encoder.pooling existed have pooling=None; they are
@@ -142,8 +144,11 @@ def series_label(family: str, pooling: str | None, task: str = "rationale") -> s
     bracketed tag: labels are passed on the command line as Hydra list
     elements, where brackets are list syntax and a space splits the argument
     in the shell before Hydra ever sees it.
+
+    `suffix` comes from forge_paths.variant_suffix: "/prefix-masked" for the e5
+    selectors trained with the "query: " prefix masked out, "" otherwise.
     """
-    base = f"{family}/{pooling}" if pooling else family
+    base = (f"{family}/{pooling}" if pooling else family) + suffix
     return base if task == "rationale" else f"{base}/{task}"
 
 
@@ -174,7 +179,7 @@ def discover_series(dataset: str) -> list[dict]:
         family = str(OmegaConf.select(cfg, "data.encoder.family"))
         pooling = OmegaConf.select(cfg, "data.encoder.pooling")
         label = series_label(family, None if pooling is None else str(pooling),
-                             str(OmegaConf.select(cfg, "task")))
+                             str(OmegaConf.select(cfg, "task")), variant_suffix(cfg))
         candidate = {
             "label": label,
             "family": family,

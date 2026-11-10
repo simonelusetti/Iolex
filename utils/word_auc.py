@@ -84,8 +84,12 @@ def _load_probe(path: Path, device: str):
     # checkpoint; freshly trained ones are a bare state_dict.
     if "model" in state and not any(k.startswith("net.") for k in state):
         state = state["model"]
-    hidden, dim = state["net.0.weight"].shape
-    model = MLPTagger(dim, num_tags=state["net.3.weight"].shape[0], hidden=hidden)
+    if "net.3.weight" in state:
+        hidden, dim = state["net.0.weight"].shape
+        model = MLPTagger(dim, num_tags=state["net.3.weight"].shape[0], hidden=hidden)
+    else:                                   # linear probe (hidden=0): net.0 maps D -> tags
+        num_tags, dim = state["net.0.weight"].shape
+        model = MLPTagger(dim, num_tags=num_tags, hidden=0)
     model.load_state_dict(state)
     return model.to(device).eval()
 
@@ -104,7 +108,8 @@ def _compute(dataset: str, family: str, device: str, checkpoints) -> dict:
 
     cfg = OmegaConf.load(ROOT / "conf/config.yaml")
     cfg.data.dataset = dataset
-    cfg.data.encoder.family = family
+    # store keys like "sbert+linear" name a probe variant; the encoder is the part before "+"
+    cfg.data.encoder.family = family.split("+")[0]
     cfg.data.encoder.pooling = "mean"      # pooling cannot reach a probe
     cfg.runtime.device = device
     cfg.runtime, _ = configure_runtime(cfg.runtime)

@@ -31,6 +31,7 @@ from numpy import linspace
 
 from .sentence import ALIAS_TO_CANON
 from .utils import should_disable_tqdm
+from .words import token_units
 
 
 def build_non_special_mask(tokenizer, input_ids, attention_mask, device):
@@ -74,66 +75,42 @@ class STSBDataset(Dataset):
 
 
 def build_stsb_collate(tokenizer, device, max_length, family: str, keep_special: bool = False):
-    # Same "query: " prefix convention as src/data.py's encode_examples, for
-    # the same reason (E5's model card documents unprefixed text as a known
-    # way to degrade embedding quality). Applied here too since this loader
-    # tokenizes STS-B independently of the encode_examples/get_dataset cache
-    # path -- it never goes through that pipeline.
+    """STS-B batches with word maps, tokenized exactly as src/data.py's encode_examples
+    does for training: words = sentence.split(), e5's "query: " prefix inserted
+    after a leading [CLS] as non-word positions, specials stripped unless
+    keep_special. Each side carries `word_ids` (-1 = not a word) so selectors
+    choose whole words and rho counts words -- the unit they were trained on.
+    """
     is_e5 = ALIAS_TO_CANON[family.lower()] == "e5"
+    prefix_ids = tokenizer.encode("query: ", add_special_tokens=False) if is_e5 else []
+    special_ids = set(tokenizer.all_special_ids)
 
-    def strip_special(toks):
-        ids = toks["input_ids"]
-        attn = toks["attention_mask"]
-        if keep_special:
-            return toks
-
-        kept_ids = []
-        kept_attn = []
-        for ids_i, attn_i in zip(ids, attn):
-            keep = ~torch.tensor(
-                tokenizer.get_special_tokens_mask(ids_i.tolist(), already_has_special_tokens=True),
-                dtype=torch.bool,
-            )
-            keep &= attn_i.bool()
-            kept_ids.append(ids_i[keep])
-            kept_attn.append(attn_i[keep])
-
+    def encode_side(sentences):
+        ids_l, wid_l = [], []
+        for s in sentences:
+            enc = tokenizer(s.split(), truncation=True, max_length=max(1, max_length - len(prefix_ids)),
+                            is_split_into_words=True)
+            ids, wids = enc["input_ids"], enc.word_ids()
+            lead = 1 if (prefix_ids and ids and ids[0] == tokenizer.cls_token_id) else 0
+            ids = ids[:lead] + prefix_ids + ids[lead:]
+            wids = wids[:lead] + [None] * len(prefix_ids) + wids[lead:]
+            if not keep_special:
+                keep = [not (w is None and t in special_ids) for t, w in zip(ids, wids)]
+                ids = [t for t, k in zip(ids, keep) if k]
+                wids = [w for w, k in zip(wids, keep) if k]
+            ids_l.append(torch.tensor(ids))
+            wid_l.append(torch.tensor([-1 if w is None else w for w in wids]))
         return {
-            "input_ids": pad_sequence(kept_ids, batch_first=True, padding_value=tokenizer.pad_token_id),
-            "attention_mask": pad_sequence(kept_attn, batch_first=True, padding_value=0),
+            "input_ids": pad_sequence(ids_l, batch_first=True, padding_value=tokenizer.pad_token_id).to(device),
+            "attention_mask": pad_sequence([torch.ones_like(x) for x in ids_l], batch_first=True).to(device),
+            "word_ids": pad_sequence(wid_l, batch_first=True, padding_value=-1).to(device),
         }
 
     def collate_fn(batch):
-        s1 = [x["sentence1"] for x in batch]
-        s2 = [x["sentence2"] for x in batch]
-        labels = torch.tensor([x["label"] for x in batch], dtype=torch.float)
-
-        if is_e5:
-            s1 = [f"query: {s}" for s in s1]
-            s2 = [f"query: {s}" for s in s2]
-
-        t1 = tokenizer(
-            s1,
-            padding=True,
-            truncation=True,
-            max_length=max_length,
-            return_tensors="pt",
-        )
-
-        t2 = tokenizer(
-            s2,
-            padding=True,
-            truncation=True,
-            max_length=max_length,
-            return_tensors="pt",
-        )
-        t1 = strip_special(t1)
-        t2 = strip_special(t2)
-
         return {
-            "t1": {k: v.to(device) for k, v in t1.items()},
-            "t2": {k: v.to(device) for k, v in t2.items()},
-            "labels": labels,
+            "t1": encode_side([x["sentence1"] for x in batch]),
+            "t2": encode_side([x["sentence2"] for x in batch]),
+            "labels": torch.tensor([x["label"] for x in batch], dtype=torch.float),
         }
 
     return collate_fn
@@ -222,69 +199,57 @@ def build_selector_mask_generator(
     hard: bool = False,
     keep_special: bool = False,
 ):
+    """Masks from the selector's own word-level forward: whole words kept, k
+    counted in words, non-word positions treated exactly as in training."""
     @torch.no_grad()
     def mask_generator(t1, a1, rhos):
         e1_full = encoder.token_embeddings(t1["input_ids"], a1)
-        z, g, _ = selector(
-            t1["input_ids"],
-            e1_full,
-            a1,
-            rhos=rhos,
-        )
-
+        z, g, _ = selector(t1["input_ids"], e1_full, a1, rhos=rhos, word_ids=t1["word_ids"])
         pred = g if hard else z
-
-        non_special = (
-            build_non_special_mask(tokenizer, t1["input_ids"], a1, device)
-            if not keep_special
-            else None
-        )
-
-        new_a1_sweep = []
-        for pred_i in pred:
-            if non_special is not None:
-                pred_i = pred_i * non_special.float()
-            new_a1_sweep.append(pred_i * a1)
-
-        return new_a1_sweep
+        return [pred_i * a1 for pred_i in pred]
 
     return mask_generator
 
 
-def build_random_mask_generator(cfg, tokenizer, device, keep_special: bool = False):
+def selector_keeps_nonword(selector) -> bool:
+    """Whether the selector's forward keeps attended non-word positions (specials,
+    e5's prefix) at every rho -- the random baseline follows the same rule."""
+    return bool(selector.keep_nonword or selector.keep_last
+                or getattr(selector.sent_encoder, "pooling", None) == "cls")
+
+
+def build_random_mask_generator(cfg, tokenizer, device, keep_special: bool = False, keep_nonword: bool = False,
+                                unit: str = "word"):
+    """Random units at the selector's budget, k = max(1, round(rho * n_units)): whole
+    words, or single pieces for unit="token" (match the selector being compared)."""
     @torch.no_grad()
     def mask_generator(t1, a1, rhos):
-        candidate_mask = a1
-        if not keep_special:
-            candidate_mask = build_non_special_mask(tokenizer, t1["input_ids"], a1, device)
-
-        T1 = candidate_mask.sum(1)
+        wids = token_units(t1["word_ids"]) if unit == "token" else t1["word_ids"]
+        is_word = wids >= 0
+        nonword = (a1 > 0) & ~is_word
+        n_words = (wids.max(dim=1).values + 1).clamp(min=0)
         new_a1_sweep = []
-
         for rho in rhos:
-            k1 = (T1.float() * rho).round().long()
-            k1 = torch.where(T1 > 0, torch.clamp(k1, min=1), torch.zeros_like(k1))
-            hard1 = torch.zeros_like(a1, dtype=torch.float, device=device)
-
+            k = (n_words.float() * rho).round().long()
+            k = torch.where(n_words > 0, k.clamp(min=1), torch.zeros_like(k))
+            keep = torch.zeros_like(a1, dtype=torch.float)
             for b in range(a1.size(0)):
-                valid = (candidate_mask[b] == 1).nonzero(as_tuple=False).squeeze(1)
-                if valid.numel() == 0:
+                n = int(n_words[b])
+                if n == 0:
                     continue
-
-                kb = min(int(k1[b].item()), valid.numel())
-                rvals = torch.rand(valid.numel(), device=device)
-                topk = torch.topk(rvals, kb).indices
-                hard1[b, valid[topk]] = 1.0
-
-            new_a1_sweep.append(hard1 * candidate_mask)
-
+                chosen = torch.randperm(n, device=device)[: int(k[b])]
+                keep[b] = torch.isin(wids[b], chosen).float()
+            if keep_nonword:
+                keep = keep.masked_fill(nonword, 1.0)
+            new_a1_sweep.append(keep * a1)
         return new_a1_sweep
 
     return mask_generator
 
 
 @torch.no_grad()
-def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, keep_special: bool = False):
+def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, keep_special: bool = False,
+                      keep_nonword: bool = False, unit: str = "word"):
     rhos = get_rhos(eval_cfg)
     runs = eval_cfg.random_selector.runs
 
@@ -312,6 +277,8 @@ def eval_random_sweep(loader, encoder, tokenizer, eval_cfg, device, keep_special
                 tokenizer,
                 device,
                 keep_special=keep_special,
+                keep_nonword=keep_nonword,
+                unit=unit,
             )
             sims = {rho: [] for rho in rhos}
             labels = []
@@ -377,6 +344,8 @@ def run_stsb_sweep(cfg, device, encoder, tokenizer, selector):
         cfg.runtime.eval,
         device,
         keep_special=keep_special,
+        keep_nonword=selector_keeps_nonword(selector),
+        unit=selector.unit,
     )
 
     return base, ours, rand

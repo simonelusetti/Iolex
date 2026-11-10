@@ -99,6 +99,59 @@ def run_dir(sig: str) -> Path:
     return dirs[0]
 
 
+DEFAULT_TRAIN_RHOS = (0.1, 1.0, 10)
+
+
+def variant_suffix(cfg) -> str:
+    """Label segments for selector variants that would otherwise share a label.
+
+    /prefix-masked -- e5 inputs start with "query: " (src/data.py). Before
+        model.selector.keep_nonword existed, the selector masked those prefix
+        tokens out of attention at every rho, so the suppressed sentence could
+        never match the full one. Those runs are kept but labelled
+        "e5/mean/prefix-masked"; the retrained ones (keep_nonword=true) take the
+        plain "e5/mean". Only e5 gets a prefix, so every other family is
+        unaffected.
+    /train-rho<lo>-<hi> -- trained on a budget range other than the default
+        model.loss.sweep_range [0.1, 1.0, 10], e.g. "sbert/mean/train-rho0.5-1".
+        The range is in the signature, so these are separate experiments; this
+        keeps them from sharing a label with the default-range ones.
+    /keep-last -- model.selector.keep_last: the last word is protected (always
+        kept, outside the budget), e.g. "llm/last/keep-last".
+    /next-token -- model.loss.objective=next_token_kl: trained to preserve the
+        LM's next-token distribution instead of the pooled representation.
+    /tokens -- model.selector.unit=token: subword pieces are selected on
+        their own and rho counts pieces, instead of whole words.
+    /no-rho -- model.selector.condition_on_rho=false: the scorer does not see
+        rho, so one fixed ranking serves every budget (the rho ablation).
+    /tau-rank<x>, /tau-gate<x> -- model.selector.tau_rank / tau_gate other than
+        the defaults 0.05 / 0.2 (the temperature sensitivity analysis), e.g.
+        "sbert/mean/tau-rank0.0125".
+    """
+    from omegaconf import OmegaConf
+
+    suffix = ""
+    if (str(OmegaConf.select(cfg, "data.encoder.family")) == "e5"
+            and not OmegaConf.select(cfg, "model.selector.keep_nonword", default=False)):
+        suffix += "/prefix-masked"
+    rng = OmegaConf.select(cfg, "model.loss.sweep_range", default=None)
+    if rng is not None and tuple(float(x) for x in rng) != DEFAULT_TRAIN_RHOS:
+        suffix += f"/train-rho{float(rng[0]):g}-{float(rng[1]):g}"
+    if OmegaConf.select(cfg, "model.selector.keep_last", default=False):
+        suffix += "/keep-last"
+    if OmegaConf.select(cfg, "model.loss.objective", default="cosine") == "next_token_kl":
+        suffix += "/next-token"
+    if OmegaConf.select(cfg, "model.selector.unit", default="word") == "token":
+        suffix += "/tokens"
+    if not OmegaConf.select(cfg, "model.selector.condition_on_rho", default=True):
+        suffix += "/no-rho"
+    for key, default in (("tau_rank", 0.05), ("tau_gate", 0.2)):
+        tau = float(OmegaConf.select(cfg, f"model.selector.{key}", default=default))
+        if tau != default:
+            suffix += f"/{key.replace('_', '-')}{tau:g}"
+    return suffix
+
+
 def discover_strategies(dataset: str, tasks: tuple[str, ...] = ("rationale", "oracle")) -> list[dict]:
     """Every selection experiment for *dataset*, newest-config first.
 
@@ -129,7 +182,7 @@ def discover_strategies(dataset: str, tasks: tuple[str, ...] = ("rationale", "or
         family = str(OmegaConf.select(cfg, "data.encoder.family"))
         pooling = OmegaConf.select(cfg, "data.encoder.pooling")
         pooling = None if pooling is None else str(pooling)
-        base = f"{family}/{pooling}" if pooling else family
+        base = (f"{family}/{pooling}" if pooling else family) + variant_suffix(cfg)
         found.append({
             "label": base if task == "rationale" else f"{base}/{task}",
             "family": family,

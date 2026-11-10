@@ -111,13 +111,15 @@ ENCODER_COLOR = {
     "bert":    "#D55E00",
     "electra": "#CC79A7",
     "roberta": "#56B4E9",
+    "simcse":  "#B07AA1",
 }
 ENCODER_MARKER = {"sbert": "o", "e5": "s", "llm": "^",
-                  "bert": "v", "electra": "D", "roberta": "P"}
+                  "bert": "v", "electra": "D", "roberta": "P", "simcse": "*"}
 ENCODER_DISPLAY = {"sbert": "sbert", "e5": "e5", "llm": "pythia",
-                   "bert": "bert", "electra": "electra", "roberta": "roberta"}
+                   "bert": "bert", "electra": "electra", "roberta": "roberta",
+                   "simcse": "simcse"}
 
-SENTENCE_ENCODERS = {"sbert", "e5", "llm"}
+SENTENCE_ENCODERS = {"sbert", "e5", "llm", "simcse"}
 TOKEN_ENCODERS = {"bert", "electra", "roberta"}
 
 # Not entity types: O's magnitude would dwarf every real tag and flatten the

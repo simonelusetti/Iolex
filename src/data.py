@@ -21,6 +21,9 @@ from .datasets_builders import (
     build_conll2003,
     build_wikiann,
     build_stsb,
+    build_beir_queries,
+    build_lambada,
+    build_pile_causal,
 )
 
 ALIASES = {
@@ -29,6 +32,9 @@ ALIASES = {
     "conll2000": {"conll2000", "conll00"},
     "movie_rationales": {"movie_rationales", "mr"},
     "stsb": {"stsb", "sts-b", "stsb-en"},
+    "beir_queries": {"beir_queries", "beir-queries"},
+    "lambada": {"lambada"},
+    "pile_causal": {"pile_causal", "pile-causal", "pythia_pile"},
     "ud_upos": {"ud_upos", "upos", "ud-upos"},
     "ud_deprel": {"ud_deprel", "deprel", "ud-deprel"},
     "ud_discourse": {"ud_discourse", "discourse", "rst", "gum"},
@@ -42,6 +48,9 @@ BUILDERS = {
     "conll2000": build_conll2000,
     "movie_rationales": build_movie_reviews,
     "stsb": build_stsb,
+    "beir_queries": build_beir_queries,
+    "lambada": build_lambada,
+    "pile_causal": build_pile_causal,
     "ud_upos": build_ud_upos,
     "ud_deprel": build_ud_deprel,
     "ud_discourse": build_ud_discourse,
@@ -261,9 +270,15 @@ def encode_examples(
             is_split_into_words=True,
         )
 
-        ids = prefix_ids + enc["input_ids"]
+        # The prefix goes after a leading [CLS] (E5's documented input is
+        # "[CLS] query: ... [SEP]"). With special tokens stripped -- every run
+        # before keep_special=true existed -- [CLS] is removed afterwards
+        # either way, so the stripped sequence is unchanged by this.
+        lead = 1 if (prefix_ids and enc["input_ids"]
+                     and enc["input_ids"][0] == tokenizer.cls_token_id) else 0
+        ids = enc["input_ids"][:lead] + prefix_ids + enc["input_ids"][lead:]
         attn_mask = [1] * len(prefix_ids) + enc["attention_mask"]
-        word_ids = [None] * len(prefix_ids) + enc.word_ids()
+        word_ids = enc.word_ids()[:lead] + [None] * len(prefix_ids) + enc.word_ids()[lead:]
 
         out = {
             "ids": ids,
@@ -320,7 +335,14 @@ def get_dataset(
         features["labels"] = Sequence(Value("string"))
     ds_dict = ds_dict.cast(features)
 
-    ds_tok = encode_examples(data_cfg, ds_dict, tokenizer)
+    # Pythia/Pile windows are constructed at exact token boundaries with the
+    # model's tokenizer.  Re-encoding them would discard that boundary and the
+    # raw-text-equivalent word ids, so already-tokenized builders pass through.
+    tokenized_columns = {"ids", "attn_mask", "tokens", "word_ids"}
+    if all(tokenized_columns.issubset(set(split.column_names)) for split in ds_dict.values()):
+        ds_tok = ds_dict
+    else:
+        ds_tok = encode_examples(data_cfg, ds_dict, tokenizer)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     ds_tok.save_to_disk(path)

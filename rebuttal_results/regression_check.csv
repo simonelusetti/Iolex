@@ -1,0 +1,21 @@
+check,reply,code,exact,match
+SBERT/STS-B selector (soft),"[0.8, 0.82, 0.83]","[0.8, 0.82, 0.83]",0.8003;0.8220;0.8337,True
+SBERT/STS-B full,[0.85],[np.float64(0.85)],0.8451,True
+E5/BEIR selector (soft),"[0.38, 0.44, 0.48]","[0.38, 0.44, 0.48]",0.3800;0.4448;0.4790,True
+E5/BEIR selector (hard),"[0.38, 0.44, 0.48]","[0.38, 0.45, 0.48]",0.3818;0.4452;0.4751,False
+E5/BEIR full,[0.49],[np.float64(0.49)],0.4915,True
+Pythia/Pile selector (soft),"[0.32, 0.4, 0.46]","[0.32, 0.4, 0.46]",0.3160;0.3997;0.4593,True
+Pythia/Pile selector (hard),"[0.32, 0.4, 0.46]","[0.32, 0.4, 0.46]",0.3167;0.4017;0.4600,True
+Pythia/Pile full,[0.51],[np.float64(0.51)],0.5090,True
+BEIR-QA selector,"[0.19, 0.31, 0.36]","[0.18, 0.31, 0.36]",0.1847;0.3097;0.3629,False
+BEIR-QA random,"[0.08, 0.16, 0.25]","[0.08, 0.16, 0.25]",0.0775;0.1588;0.2514,True
+SBERT fidelity selector,"[0.61, 0.87, 0.98]","[0.61, 0.87, 0.98]",0.6101;0.8706;0.9829,True
+SBERT fidelity random,"[0.44, 0.58, 0.75]","[0.44, 0.58, 0.75]",0.4391;0.5843;0.7506,True
+SBERT tau default,"[0.55, 0.75, 0.83]","[0.55, 0.75, 0.83]",0.5453;0.7490;0.8336,True
+SBERT with rho,"[0.55, 0.75, 0.83]","[0.55, 0.75, 0.83]",0.5453;0.7490;0.8336,True
+SBERT without rho,"[0.51, 0.68, 0.83]","[0.51, 0.68, 0.82]",0.5077;0.6755;0.8250,False
+SBERT seed agreement,"[0.47, 0.81, 0.96]","[0.47, 0.81, 0.96]",0.4712;0.8122;0.9640,True
+SBERT length rho=.5 (%),"[-53, -69, -75]","[np.float64(-53.0), np.float64(-69.0), np.float64(-75.0)]",-52.9319;-69.0252;-74.7461,True
+SBERT nesting,0.997,0.997,0.99743,True
+E5 nesting,1.0,1.0,0.99998,True
+Pythia-410M nesting,1.0,1.0,1.00000,True

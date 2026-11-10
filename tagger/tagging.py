@@ -9,6 +9,11 @@ figures can still show a spread across independently trained probes.
 
     outputs/probe/<dataset>/<family>/seed<k>/{model.pth,report.json}
 
+With `saliency`, the probe's input is each word's embedding with the selector's
+persistence a appended (tagger/saliency.py), same MLP otherwise. Those probes
+are keyed "<family>+a" (real a) and "<family>+a_perm" (a permuted within each
+sentence, the baseline), so they never overwrite the plain probe.
+
 report.json holds the three views the plot scripts read -- span level
 (seqeval), token level (per-tag), and a binary entity/O collapse -- plus the
 per-epoch `history` the B/I convergence figure needs. There is one model per
@@ -32,6 +37,7 @@ from src.data import LABEL_DISPLAY_NAMES, PAD_TAG, canonical_name, initialize_da
 from src.utils import to_device
 
 from .model import MLPTagger, gather_word_level
+from .saliency import Saliency
 
 ROOT = Path(__file__).resolve().parent.parent
 STORE = ROOT / "outputs" / "probe"
@@ -163,7 +169,8 @@ def headline_f1(report: dict) -> float:
 class _Probe:
     """One MLP over one frozen encoder. Lives only as long as a train call."""
 
-    def __init__(self, cfg, encoder, tags: list[str], train_dl, test_dl, device: str):
+    def __init__(self, cfg, encoder, tags: list[str], train_dl, test_dl, device: str,
+                 saliency: Saliency | None = None):
         self.encoder, self.tags, self.device = encoder, tags, device
         self.train_dl, self.test_dl = train_dl, test_dl
         self.quiet = bool(cfg.runtime.eval.get("short_log", False)) or bool(cfg.runtime.get("grid", False))
@@ -180,8 +187,9 @@ class _Probe:
             dim = encoder.token_embeddings(
                 first["ids"].to(device), first["attn_mask"].to(device)).shape[-1]
 
+        self.saliency = saliency
         tagger_cfg = cfg.get("tagger", {})
-        self.model = MLPTagger(dim, num_tags=len(tags),
+        self.model = MLPTagger(dim + (1 if saliency is not None else 0), num_tags=len(tags),
                                hidden=int(tagger_cfg.get("hidden", 256)),
                                dropout=float(tagger_cfg.get("dropout", 0.1))).to(device)
         self.optimizer = torch.optim.AdamW(
@@ -213,6 +221,9 @@ class _Probe:
         with torch.no_grad():
             token_emb = self.encoder.token_embeddings(batch["ids"], batch["attn_mask"])
         word_emb, word_mask, word_labels = gather_word_level(token_emb, batch["word_ids"], label_ids)
+        if self.saliency is not None:
+            a = self.saliency(token_emb, batch)[:, :word_emb.shape[1]]
+            word_emb = torch.cat([word_emb, a.to(word_emb.dtype).unsqueeze(-1)], dim=-1)
         emissions = self.model(word_emb, word_mask)
         return emissions, word_mask, word_labels, self.model.loss(
             emissions, word_labels, word_mask, weight=self.weights)
@@ -260,7 +271,15 @@ class _Probe:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def performances(cfg, dataset: str | None = None, seeds=(0,), retrain: bool = False) -> list[dict]:
+def saliency_key(family: str, saliency: str | None, linear: bool = False) -> str:
+    """Store key: the plain family, then "+linear" for the linear probe, then
+    "+a" / "+a_perm" for the saliency feature (e.g. "sbert+linear", "sbert+a")."""
+    key = family + ("+linear" if linear else "")
+    return key if saliency is None else f"{key}+{'a' if saliency == 'a' else 'a_perm'}"
+
+
+def performances(cfg, dataset: str | None = None, seeds=(0,), retrain: bool = False,
+                 saliency: str | None = None, linear: bool = False) -> list[dict]:
     """Probe performance on `dataset`, training and saving only what is missing.
 
     Returns one report per seed. `cfg` supplies the encoder, optimiser and
@@ -268,7 +287,10 @@ def performances(cfg, dataset: str | None = None, seeds=(0,), retrain: bool = Fa
     ask about a corpus it is not itself training on.
     """
     dataset = canonical_name(dataset or cfg.data.dataset)
-    family = str(cfg.data.encoder.family)
+    encoder_family = str(cfg.data.encoder.family)
+    family = saliency_key(encoder_family, saliency, linear)
+    if linear:
+        cfg.tagger.hidden = 0
     tags = tag_names(dataset)
 
     wanted = [s for s in seeds
@@ -286,10 +308,21 @@ def performances(cfg, dataset: str | None = None, seeds=(0,), retrain: bool = Fa
             data_cfg, cfg.runtime.data, None, device=cfg.runtime.device,
             keep_special=bool(cfg.model.get("keep_special", True)))
 
+        sal = None
+        if saliency is not None:
+            encoder.to(cfg.runtime.device).eval().requires_grad_(False)
+            with torch.no_grad():
+                first = next(iter(train_dl))
+                dim = encoder.token_embeddings(first["ids"].to(cfg.runtime.device),
+                                               first["attn_mask"].to(cfg.runtime.device)).shape[-1]
+            sal = Saliency(dataset, encoder_family, encoder, dim, cfg.runtime.device, mode=saliency)
+            log.info("saliency feature: mode=%s from %s (%d selector seeds)",
+                     saliency, sal.label, len(sal.models))
+
         for seed in wanted:
             torch.manual_seed(int(seed))
             log.info("training tagger: %s/%s seed=%s", dataset, family, seed)
-            probe = _Probe(cfg, encoder, tags, train_dl, test_dl, cfg.runtime.device)
+            probe = _Probe(cfg, encoder, tags, train_dl, test_dl, cfg.runtime.device, saliency=sal)
             history = probe.fit(int(cfg.train.epochs))
             out = store_dir(dataset, family, seed)
             out.mkdir(parents=True, exist_ok=True)

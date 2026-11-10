@@ -15,7 +15,7 @@ from omegaconf import OmegaConf
 
 from src.utils import configure_runtime
 
-from .tagging import headline_f1, performances
+from .tagging import headline_f1, performances, saliency_key
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -31,6 +31,11 @@ def main() -> int:
                         help="inverse-frequency loss weights; for skewed corpora "
                              "such as movie_rationales")
     parser.add_argument("--retrain", action="store_true", help="ignore any cached model")
+    parser.add_argument("--linear", action="store_true",
+                        help="linear probe (no hidden layer); stored as <family>+linear")
+    parser.add_argument("--saliency", choices=["a", "perm"], default=None,
+                        help="append the selector's persistence a to each word's input "
+                             "(perm: a permuted within each sentence, the baseline)")
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                         help="extra dotted config override, repeatable")
     args = parser.parse_args()
@@ -52,9 +57,10 @@ def main() -> int:
 
     seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
     for dataset in args.datasets:
-        reports = performances(cfg, dataset=dataset, seeds=seeds, retrain=args.retrain)
+        reports = performances(cfg, dataset=dataset, seeds=seeds, retrain=args.retrain,
+                               saliency=args.saliency, linear=args.linear)
         f1 = [headline_f1(r) for r in reports]
-        print(f"{dataset}/{args.family}: macro F1 "
+        print(f"{dataset}/{saliency_key(args.family, args.saliency, args.linear)}: macro F1 "
               + ", ".join(f"seed{s}={v:.4f}" for s, v in zip(seeds, f1)))
     return 0
 

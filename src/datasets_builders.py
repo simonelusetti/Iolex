@@ -155,6 +155,73 @@ def build_stsb() -> DatasetDict:
     })
 
 
+def _holdout(rows: list[dict], frac: float = 0.1, seed: int = 0) -> DatasetDict:
+    """Fixed random train/test split of a label-free bag of texts (the trainer
+    wants a test split for its eval loss)."""
+    import random
+    rows = list(rows)
+    random.Random(seed).shuffle(rows)
+    k = max(1, int(len(rows) * frac))
+    return DatasetDict({"train": Dataset.from_list(rows[k:]), "test": Dataset.from_list(rows[:k])})
+
+
+BEIR_SETS = ("scifact", "nfcorpus", "fiqa")
+
+
+def build_beir_queries() -> DatasetDict:
+    # Selector-training text for E5's home task (retrieval): the queries of the
+    # TRAINING split of each BEIR set used in the E5 evaluation, query text only
+    # -- never the relevance judgements, and never a test query.
+    rows = []
+    for name in BEIR_SETS:
+        # qrels ids are ints for some sets (scifact, fiqa), query ids always str
+        train_ids = set(map(str, load_dataset(f"BeIR/{name}-qrels", split="train")["query-id"]))
+        q = load_dataset(f"BeIR/{name}", "queries", split="queries")
+        rows += [{"tokens": t.split()} for i, t in zip(q["_id"], q["text"])
+                 if i in train_ids and t.split()]
+    return _holdout(rows)
+
+
+def build_lambada() -> DatasetDict:
+    # Selector-training text for the legacy LAMBADA transfer experiment: the
+    # VALIDATION passages of the original release (disjoint from the 5,153
+    # test passages), final word removed.  This is not Pythia's pretraining
+    # distribution; build_pile_causal below is the matched home-task builder.
+    #
+    # Every word after the first carries its leading space. Pythia's tokenizer
+    # takes word lists as-is (no add_prefix_space, see src/sentence.py), so a
+    # bare "cat" would be segmented as if glued to its neighbour; " cat" gives
+    # the natural-text tokens the LAMBADA evaluation feeds the model, while the
+    # word list still fixes the selector's word boundaries. Used with llm only.
+    ds = load_dataset("cimec/lambada", split="validation")
+    rows = []
+    for t in ds["text"]:
+        words = t.split()[:-1]
+        if words:
+            rows.append({"tokens": [w if i == 0 else " " + w for i, w in enumerate(words)]})
+    return _holdout(rows)
+
+
+def build_pile_causal() -> DatasetDict:
+    """Pythia's actual home-task data: next-token contexts from The Pile.
+
+    The official Pile validation split supplies label-free selector training
+    contexts.  Its fixed holdout is used only for checkpoint selection; the
+    official Pile test split remains untouched for home-task evaluation.
+    Rows are already tokenized so the exact byte-level input and word mapping
+    used to construct each fixed-length window survive the shared data cache.
+    """
+    from .pythia_pile import TRAIN_WINDOWS, pile_windows
+    from .sentence import resolve_tokenizer
+
+    rows = pile_windows("validation", resolve_tokenizer("llm"), TRAIN_WINDOWS)
+    # target_id is deliberately absent from the trainer-facing rows: the
+    # selector is label-free and learns from Pythia's full distribution.
+    rows = [{k: v for k, v in row.items() if k not in ("target_id", "pile_set_name")}
+            for row in rows]
+    return _holdout(rows)
+
+
 def build_movie_reviews() -> DatasetDict:
     # The script-based movie_rationales repo no longer loads with pinned
     # datasets<3; its auto-converted parquet export carries the same data.

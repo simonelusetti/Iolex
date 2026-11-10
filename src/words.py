@@ -81,6 +81,42 @@ def scatter_word_to_tokens(word_vals: torch.Tensor, word_ids: torch.Tensor) -> t
     return word_vals.gather(1, slot) * is_word.to(word_vals.dtype)
 
 
+def protect_last_word(word_ids: torch.Tensor) -> torch.Tensor:
+    """Make each row's last word a non-word (word id -1) -- every one of its pieces.
+
+    Non-word positions are never voted on, do not count toward the budget k,
+    and stay unmasked (RationaleSelectorModel keeps attended non-word positions,
+    like E5's "query: " prefix). Used for causal encoders under `last` pooling,
+    where the final token is the sentence representation and must always
+    survive (model.selector.keep_last). The last word is the one at the last
+    position with a word id; padding and existing non-words are untouched.
+    Idempotent.
+    """
+    is_word = word_ids >= 0
+    if not is_word.any():
+        return word_ids
+    L = word_ids.shape[1]
+    pos = torch.arange(L, device=word_ids.device).expand_as(word_ids)
+    last_pos = torch.where(is_word, pos, torch.full_like(pos, -1)).max(dim=1).values      # [B]
+    has = last_pos >= 0
+    last_wid = word_ids.gather(1, last_pos.clamp(min=0)[:, None])                            # [B, 1]
+    hit = has[:, None] & is_word & (word_ids == last_wid)
+    return torch.where(hit, torch.full_like(word_ids, -1), word_ids)
+
+
+def token_units(word_ids: torch.Tensor) -> torch.Tensor:
+    """Every subword piece its own selection unit -- model.selector.unit=token.
+
+    Word positions are renumbered 0, 1, 2, ... per row in order, so each piece
+    becomes a one-piece "word" and every word-level helper (and the budget k)
+    then works over pieces. Non-word positions (-1: padding, specials, e5's
+    prefix) are untouched, so they stay outside selection exactly as in word
+    mode. Idempotent.
+    """
+    is_word = word_ids >= 0
+    return torch.where(is_word, is_word.long().cumsum(dim=1) - 1, word_ids)
+
+
 def subword_counts(word_ids: torch.Tensor) -> torch.Tensor:
     """[B, W] how many subwords each word occupies -- a covariate, since
     fragmentation is exactly the confound word-level selection removes."""

@@ -58,12 +58,17 @@ class MLPTagger(nn.Module):
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(embedding_dim, hidden),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden, num_tags),
-        )
+        # hidden=0 is the LINEAR probe: one affine map from the word embedding to
+        # the tags (multinomial logistic regression), no hidden layer, no dropout.
+        if hidden == 0:
+            self.net = nn.Sequential(nn.Linear(embedding_dim, num_tags))
+        else:
+            self.net = nn.Sequential(
+                nn.Linear(embedding_dim, hidden),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden, num_tags),
+            )
 
     def forward(self, word_emb: torch.Tensor, word_mask: torch.Tensor) -> torch.Tensor:
         return self.net(word_emb)

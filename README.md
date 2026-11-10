@@ -51,3 +51,14 @@ token occurrences, labels, statuses, masks, and their matching occurrence IDs.
 - `analysis/`: generated NER results (ignored by git).
 - `old/`: archived selector, oracle, pooling, STS-B, and paper-analysis code.
 
+(modello multifattoriale, regressione)
+sensistivy analsysis: misura drift al variare di
+- rho
+- sentence length
+- NON i tau
+prendi gli effetti e i loro p-values
+
+Review KwjD: 
+- primo punto di justification: fai grounding test di rationale, usando direttamente perfroamnces vs saliency
+
+Homestasks: rifarlo softmask

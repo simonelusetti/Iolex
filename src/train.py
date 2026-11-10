@@ -40,8 +40,9 @@ from .utils import (
 from .view import save_train_eval_loss_plot, save_eval_plots
 
 
-# Selection operates on whole words; see src/words.py for why.
-SELECTION_UNIT = "word"
+# Selection operates on whole words by default (see src/words.py for why);
+# model.selector.unit=token selects subword pieces instead. The unit a
+# checkpoint was trained with is stored in its meta and checked on load.
 
 
 class SelectorTrainer:
@@ -89,6 +90,9 @@ class SelectorTrainer:
         self.plots_dir = self.checkpoint_dir / "plots"
         self.data_dir = self.checkpoint_dir / "data"
         self.loss_history_path = self.data_dir / "loss_history.json"
+        self.best_selector_path = self.models_dir / "selector_best.pth"
+        self.best_eval_loss = float("inf")
+        self.best_epoch = 0
 
         self.tokenizer = tokenizer
         self.labels_set = None if labels_set is None else set(labels_set) | {SPECIAL_TAG}
@@ -148,24 +152,55 @@ class SelectorTrainer:
 
     def save_checkpoint(self, epoch: int) -> None:
         checkpoint_path = self.checkpoint_path(epoch)
+        selector_only = bool(self.cfg.train.get("selector_only_checkpoint", False))
         torch.save(
             {
-                "model": self.model.state_dict(),
+                # The frozen encoder is reconstructible from config and is 1.4
+                # GB for Pythia-410m.  New home-task runs may store only the
+                # 1.4M-parameter selector, making per-epoch best-model tracking
+                # practical without changing legacy checkpoint files.
+                "model": self.model.selector.state_dict() if selector_only else self.model.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
                 "meta": {
                     "sig": self.run.signature,
                     "epoch": epoch,
+                    "selector_only": selector_only,
                     # Guards against silently resuming a subword-era
                     # checkpoint: the selector MLP is D->scalar either way, so
                     # such a checkpoint would load cleanly and quietly produce
                     # a ranking trained for a different unit and budget.
-                    "selection_unit": SELECTION_UNIT,
+                    "selection_unit": self.model.unit,
                 },
             },
             checkpoint_path,
         )
         save_combined_loss_history(self.train_loss_history, self.eval_loss_history, self.loss_history_path)
         self.logger.info("Saved checkpoint to %s", checkpoint_path)
+
+    def maybe_save_best_selector(self, epoch: int, eval_loss: float) -> None:
+        """Keep the selector with the lowest deterministic validation KL."""
+        if not math.isfinite(eval_loss) or eval_loss >= self.best_eval_loss:
+            return
+        self.best_eval_loss = float(eval_loss)
+        self.best_epoch = int(epoch)
+        torch.save({
+            "selector": self.model.selector.state_dict(),
+            "meta": {"epoch": self.best_epoch, "eval_loss": self.best_eval_loss},
+        }, self.best_selector_path)
+        self.logger.info("Saved best selector at epoch %d (eval_loss=%.4f)", epoch, eval_loss)
+
+    def restore_best_selector(self) -> None:
+        if not self.best_selector_path.exists():
+            return
+        state = torch.load(self.best_selector_path, map_location=self.device)
+        self.model.selector.load_state_dict(state["selector"])
+        meta = state.get("meta", {})
+        self.best_epoch = int(meta.get("epoch", self.best_epoch))
+        self.best_eval_loss = float(meta.get("eval_loss", self.best_eval_loss))
+        self.extra_metrics.update({"best_epoch": self.best_epoch,
+                                   "best_eval_loss": self.best_eval_loss})
+        self.logger.info("Restored best selector from epoch %d (eval_loss=%.4f)",
+                         self.best_epoch, self.best_eval_loss)
 
     def load_checkpoint(self, checkpoint_path: Path | None = None) -> int:
         if checkpoint_path is None:
@@ -176,16 +211,21 @@ class SelectorTrainer:
 
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         unit = checkpoint.get("meta", {}).get("selection_unit")
-        if unit != SELECTION_UNIT:
+        # A checkpoint with no unit predates word-level selection (and the
+        # rest of today's selector code): refused even under unit=token.
+        if unit != self.model.unit:
             raise ValueError(
                 f"{checkpoint_path} was trained with selection_unit="
-                f"{unit or 'token (pre-word-level)'!r}, but this build selects "
-                f"{SELECTION_UNIT!r}. The weights would load without error and "
+                f"{unit or 'token (pre-word-level)'!r}, but this run selects "
+                f"{self.model.unit!r}. The weights would load without error and "
                 f"silently produce a ranking learnt for a different unit and "
                 f"budget. Purge the run and retrain."
             )
-        state_dict = remap_checkpoint_state_dict(checkpoint["model"], self.model.state_dict())
-        self.model.load_state_dict(state_dict)
+        if checkpoint.get("meta", {}).get("selector_only", False):
+            self.model.selector.load_state_dict(checkpoint["model"])
+        else:
+            state_dict = remap_checkpoint_state_dict(checkpoint["model"], self.model.state_dict())
+            self.model.load_state_dict(state_dict)
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         meta = checkpoint.get("meta", {})
 
@@ -325,8 +365,11 @@ class SelectorTrainer:
                     # which is the fragmentation artifact word-level selection
                     # exists to remove. Positions belonging to no word (special
                     # tokens, when kept) still count once each.
-                    counts_once = (first_subword_mask(word_ids) | (word_ids < 0)).view(-1).cpu()
-                    flat_attn = flat_attn & counts_once
+                    # Under unit=token every piece is selected on its own, so
+                    # every piece counts.
+                    if self.model.unit == "word":
+                        counts_once = (first_subword_mask(word_ids) | (word_ids < 0)).view(-1).cpu()
+                        flat_attn = flat_attn & counts_once
 
                 for i, pred_mask_i in enumerate(pred_mask):
                     flat_preds = pred_mask_i.cpu().view(-1)
@@ -479,6 +522,7 @@ class SelectorTrainer:
                         start_epoch,
                         self.epochs,
                     )
+                    self.restore_best_selector()
                     self.final_eval()
                     return
 
@@ -499,6 +543,10 @@ class SelectorTrainer:
 
         for epoch in epoch_bar:
             self.model.train()
+            # RationaleSelectorModel owns the frozen encoder as a child, so
+            # model.train() would otherwise reactivate encoder dropout.  Only
+            # the selector MLP should be in training mode.
+            self.sent_encoder.eval()
             total_loss = 0.0
             examples_count = 0
 
@@ -528,6 +576,9 @@ class SelectorTrainer:
                     = self.forward_pass(batch, examples_count, total_loss, rhos=step_rhos)
 
                 loss.backward()
+                gradient_clip = self.cfg.train.get("gradient_clip", None)
+                if gradient_clip is not None:
+                    torch.nn.utils.clip_grad_norm_(self.model.selector.parameters(), float(gradient_clip))
                 self.optimizer.step()
 
             total_loss /= max(1, examples_count)
@@ -550,6 +601,7 @@ class SelectorTrainer:
             )
             self.completed_epochs = epoch + 1
             self.save_checkpoint(epoch + 1)
+            self.maybe_save_best_selector(epoch + 1, float(eval_losses.get("eval_loss", float("nan"))))
             # NaN placeholders (runtime.eval.skip=true) are dropped rather than
             # written out -- JSON has no NaN literal, and an absent key reads
             # more honestly than a null in `forge` output.
@@ -570,6 +622,7 @@ class SelectorTrainer:
                 training_completed=False,
             )
 
+        self.restore_best_selector()
         self.final_eval()
 
 

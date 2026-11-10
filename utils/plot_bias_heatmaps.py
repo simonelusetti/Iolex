@@ -41,6 +41,7 @@ import argparse
 import json
 import math
 import sys
+import re
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -128,7 +129,7 @@ def main(dataset: str, metric: str, strategies: list[str] | None, ncols: int, ou
         im = ax.imshow(data, aspect="auto", cmap=cmap, norm=norm, origin="upper")
         ax.set_yticks(range(len(present)))
         ax.set_yticklabels(present, fontsize=7)
-        ax.set_title(label, fontsize=9)
+        ax.set_title(re.sub(r"^llm\b", "pythia", label), fontsize=9)   # "pythia" in plots; label keeps "llm"
         ax.set_xticks(range(len(rho)))
         ax.set_xticklabels([f"{r:.1f}" for r in rho], fontsize=6, rotation=45, ha="right")
     for ax in axes.ravel()[len(panels):]:
